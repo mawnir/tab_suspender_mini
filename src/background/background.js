@@ -226,4 +226,4 @@ setInterval(() => {
             });
         });
     });
-}, 60000); // Check every minute
+}, 60000); // Check every minutes
