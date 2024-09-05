@@ -1,10 +1,17 @@
-The extension aims to improve browser performance by suspending inactive tabs while providing flexibility through user-defined exceptions and settings.
-Here's a summary of its main functions:
---> Tab Suspension: Automatically suspends inactive tabs after a set delay (default 1 minute).
-Suspended tabs are replaced with a custom suspended page, storing the original URL and title.
---> Captures a screenshot of the tab before suspending (if possible).
---> Exception Handling: Maintains a list of exception domains that won't be suspended.
-Checks URLs against this list before suspending.
---> User Interaction: Allows manual suspension of tabs.
-Special Cases: Doesn't suspend tabs playing audio.
-Ignores certain browser-specific URLs (e.g., about:, chrome:, moz-extension:).
+# Browser Performance Enhancer Extension
+
+This extension improves browser performance by automatically suspending inactive tabs, reducing memory and CPU usage. It offers flexibility with customizable settings and user-defined exceptions.
+
+## Features
+
+### Tab Suspension
+- **Automatic Suspension:** Inactive tabs are automatically suspended after a user-defined delay (default: 1 minute). Suspended tabs are replaced with a custom suspension page that stores the original URL and title.
+- **Screenshot Capture:** Captures a screenshot of the tab before suspension (where supported).
+- **Manual Suspension:** Users can manually suspend tabs at any time for increased control.
+
+### Exception Handling
+- **Domain Exceptions:** Maintain a list of domains that will not be suspended. The extension checks URLs against this list before suspending tabs.
+
+### Special Cases
+- **Audio Playback Protection:** Tabs playing audio will not be suspended to avoid interruptions.
+- **Browser-Specific URLs:** Ignores certain internal browser URLs (e.g., `about:`, `chrome:`, `moz-extension:`) to ensure smooth operation.
