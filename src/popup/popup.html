@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Tab Suspender Settings</title>
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --background: #ffffff;
+            --foreground: #1f2937;
+            --card: #f9fafb;
+            --card-foreground: #111827;
+            --secondary: #f3f4f6;
+            --border: #e5e7eb;
+        }
+
+        body {
+            width: 350px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            padding: 16px;
+            margin: 0;
+            background-color: var(--background);
+            color: var(--foreground);
+        }
+
+        .card {
+            background-color: var(--card);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        h2 {
+            margin-top: 0;
+            margin-bottom: 16px;
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--card-foreground);
+        }
+
+        .input-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        input[type="number"] {
+            width: 20%;
+            padding: 8px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            margin-top: 8px;
+        }
+
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+
+        #addDomain {
+            margin-top: 8px;
+        }
+
+        #exceptionList {
+            list-style-type: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        #exceptionList li {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: var(--secondary);
+            padding: 8px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+
+        .remove-domain {
+            background-color: transparent;
+            color: var(--foreground);
+            padding: 4px 8px;
+        }
+
+        #suspendCurrentTab {
+            width: 100%;
+            margin-top: 16px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <h2>Suspension Timer</h2>
+        <div class="input-group">
+            <label for="suspensionTimer">Discard inactive tabs after</label>
+            <div class="timer-input">
+                <input type="number" id="suspensionTimer" min="1" max="60" value="1">
+                <span>minutes</span>
+            </div>
+        </div>
+        <button id="saveTimer">Save</button>
+    </div>
+
+    <!-- <div class="setting-group">
+        <h2>Suspension Timer</h2>
+        <div class="timer-setting">
+            <label for="suspensionTimer">Discard inactive tabs after</label>
+            <input type="number" id="suspensionTimer" min="1" step="1">
+            <span>minutes</span>
+        </div>
+        <button id="saveTimer">Save</button>
+    </div> -->
+
+    <div class="card">
+        <h2>Domain Exceptions</h2>
+        <div class="input-group">
+            <input type="text" id="domainInput" placeholder="Enter domain (e.g., example.com)">
+            <button id="addDomain">Add Exception</button>
+        </div>
+        <ul id="exceptionList"></ul>
+    </div>
+
+    <!-- <div class="setting-group">
+        <h2>Domain Exceptions</h2>
+        <input type="text" id="domainInput" placeholder="Enter domain (e.g., example.com)">
+        <button id="addDomain">Add Exception</button>
+        <ul id="exceptionList"></ul>
+    </div> -->
+
+
+    <button id="suspendCurrentTab">Suspend Current Tab</button>
+    <script src="popup.js"></script>
+</body>
+
+</html>
