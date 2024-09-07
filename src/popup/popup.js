@@ -17,6 +17,11 @@ document.addEventListener('DOMContentLoaded', function () {
             browser.storage.local.set({ suspensionTimer: timerValue }, function () {
                 console.log("Timer saved:", timerValue);
                 browser.runtime.sendMessage({ action: "updateTimer", value: timerValue });
+                // Add a visual feedback for the user
+                saveTimerButton.textContent = "Saved!";
+                setTimeout(() => {
+                    saveTimerButton.textContent = "Save";
+                }, 2000);
             });
         }
     });
@@ -76,11 +81,15 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Add event listener for the suspend current tab button
     const suspendCurrentTabButton = document.getElementById('suspendCurrentTab');
-    suspendCurrentTabButton.addEventListener('click', function () {
-        browser.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-            if (tabs[0]) {
-                browser.runtime.sendMessage({ action: "suspendTab", tabId: tabs[0].id });
-            }
-        });
+    suspendCurrentTabButton.addEventListener('click', () => {
+        console.log("Suspend current tab button clicked");
+        browser.runtime.sendMessage({ action: "suspendTab" })
+            .then(response => {
+                console.log("Message sent successfully", response);
+                window.close(); // Close the popup after sending the message
+            })
+            .catch(error => {
+                console.error("Error sending message:", error);
+            });
     });
 });

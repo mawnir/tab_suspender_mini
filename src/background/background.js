@@ -2,27 +2,9 @@ console.log("Tab Suspender extension loaded");
 
 let SUSPEND_DELAY = 60; // default 1 minute
 const SUSPENDED_PREFIX = "💤 ";
-
-// Load the suspension timer from storage
-browser.storage.local.get('suspensionTimer', function (data) {
-    SUSPEND_DELAY = (data.suspensionTimer || 1) * 60; // Convert minutes to seconds
-});
-
-browser.tabs.onActivated.addListener(activeInfo => {
-    console.log("Tab activated:", activeInfo.tabId);
-    resetTimer(activeInfo.tabId);
-    // Remove this line: unsuspendTab(activeInfo.tabId);
-});
-
-browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (changeInfo.status === 'complete') {
-        console.log("Tab updated:", tabId);
-        resetTimer(tabId);
-    }
-});
-
 let suspensionTimers = {};
 
+// Function definitions
 function isExceptionDomain(url) {
     return new Promise((resolve) => {
         if (!url) {
@@ -51,6 +33,89 @@ function isExceptionDomain(url) {
             });
             console.log("Is exception?", isException);
             resolve(isException);
+        });
+    });
+}
+
+function updateIcon(active) {
+    const path = active ? "icons/icon_active.png" : "icons/icon_inactive.png";
+    browser.browserAction.setIcon({ path });
+}
+
+function suspendTab(tabId) {
+    console.log("Entering suspendTab function for tabId:", tabId);
+    return new Promise((resolve, reject) => {
+        browser.tabs.get(tabId).then(tab => {
+            console.log("Retrieved tab info:", tab);
+            if (!tab.url) {
+                console.log("Tab has no URL, not suspending:", tabId);
+                reject(new Error("Tab has no URL"));
+                return;
+            }
+
+            console.log("Checking if tab is exception:", tab.url);
+            isExceptionDomain(tab.url).then(isException => {
+                console.log(`Tab ${tabId} exception status:`, isException);
+                if (tab.url.startsWith(browser.runtime.getURL("")) ||
+                    tab.url.startsWith("about:") ||
+                    tab.url.startsWith("chrome:") ||
+                    tab.url.startsWith("moz-extension:") ||
+                    tab.url === 'about:blank' ||
+                    tab.url === 'about:newtab' ||
+                    isException) {
+                    console.log("Tab not eligible for suspension:", tabId);
+                    reject(new Error("Tab not eligible for suspension"));
+                    return;
+                }
+
+                console.log("Proceeding with tab suspension:", tabId);
+                const encodedTitle = encodeURIComponent(tab.title || 'Untitled');
+                console.log("Encoded title:", encodedTitle);
+
+                console.log("Attempting to capture screenshot for tab:", tabId);
+                browser.tabs.captureTab(tabId, { format: 'jpeg', quality: 50 }).then(screenshotUrl => {
+                    console.log("Screenshot captured for tab:", tabId);
+                    const suspendedUrl = browser.runtime.getURL("src/suspended/suspended.html") +
+                        "?url=" + encodeURIComponent(tab.url) +
+                        "&title=" + encodedTitle +
+                        "&prefix=" + encodeURIComponent(SUSPENDED_PREFIX) +
+                        "&favicon=" + encodeURIComponent(tab.favIconUrl || '') +
+                        "&screenshot=" + encodeURIComponent(screenshotUrl);
+
+                    console.log("Suspended URL:", suspendedUrl);
+                    browser.tabs.update(tabId, { url: suspendedUrl }).then(() => {
+                        console.log("Tab successfully suspended:", tabId);
+                        updateIcon(true);
+                        resolve();
+                    }).catch(error => {
+                        console.error("Error updating tab:", tabId, error);
+                        reject(error);
+                    });
+                }).catch(error => {
+                    console.error("Error capturing screenshot:", error);
+                    // If screenshot capture fails, suspend the tab without a screenshot
+                    const suspendedUrl = browser.runtime.getURL("src/suspended/suspended.html") +
+                        "?url=" + encodeURIComponent(tab.url) +
+                        "&title=" + encodedTitle +
+                        "&prefix=" + encodeURIComponent(SUSPENDED_PREFIX) +
+                        "&favicon=" + encodeURIComponent(tab.favIconUrl || '');
+
+                    browser.tabs.update(tabId, { url: suspendedUrl }).then(() => {
+                        console.log("Tab suspended without screenshot:", tabId);
+                        updateIcon(true);
+                        resolve();
+                    }).catch(error => {
+                        console.error("Error updating tab without screenshot:", tabId, error);
+                        reject(error);
+                    });
+                });
+            }).catch(error => {
+                console.error("Error checking exception domain:", error);
+                reject(error);
+            });
+        }).catch(error => {
+            console.error("Error getting tab:", tabId, error);
+            reject(error);
         });
     });
 }
@@ -101,90 +166,66 @@ function checkExceptionAndSetTimer(tabId, url) {
     });
 }
 
-function suspendTab(tabId) {
-    console.log("Attempting to suspend tab:", tabId);
-    browser.tabs.get(tabId).then(tab => {
-        console.log("Tab info:", tab);
-        if (!tab.url) {
-            console.log("Tab has no URL, not suspending:", tabId);
-            return;
-        }
-
-        // Check if the tab is already suspended
-        if (tab.url.startsWith(browser.runtime.getURL("src/suspended/suspended.html"))) {
-            console.log("Tab is already suspended:", tabId);
-            return;
-        }
-
-        // Check if the tab is playing audio
-        if (tab.audible) {
-            console.log("Tab is playing audio, not suspending:", tabId);
-            return;
-        }
-
-        isExceptionDomain(tab.url).then(isException => {
-            console.log(`Tab ${tabId} exception status:`, isException);
-            if (tab.url.startsWith(browser.runtime.getURL("")) ||
-                tab.url.startsWith("about:") ||
-                tab.url.startsWith("chrome:") ||
-                tab.url.startsWith("moz-extension:") ||
-                tab.url === 'about:blank' ||
-                tab.url === 'about:newtab' ||
-                isException) {
-                console.log("Tab not eligible for suspension:", tabId);
-                return;
-            }
-
-            console.log("Suspending tab:", tabId);
-            console.log("Original title:", tab.title);
-            const encodedTitle = encodeURIComponent(tab.title || 'Untitled');
-            console.log("Encoded title:", encodedTitle);
-
-            // Capture screenshot of the specific tab
-            browser.tabs.captureTab(tabId, { format: 'jpeg', quality: 50 }).then(screenshotUrl => {
-                const suspendedUrl = browser.runtime.getURL("src/suspended/suspended.html") +
-                    "?url=" + encodeURIComponent(tab.url) +
-                    "&title=" + encodedTitle +
-                    "&prefix=" + encodeURIComponent(SUSPENDED_PREFIX) +
-                    "&favicon=" + encodeURIComponent(tab.favIconUrl || '') +
-                    "&screenshot=" + encodeURIComponent(screenshotUrl);
-
-                console.log("Suspended URL:", suspendedUrl);
-                browser.tabs.update(tabId, { url: suspendedUrl }).then(() => {
-                    console.log("Tab suspended:", tabId);
-                }).catch(error => {
-                    console.error("Error suspending tab:", tabId, error);
-                });
-            }).catch(error => {
-                console.error("Error capturing screenshot:", error);
-                // If screenshot capture fails, suspend the tab without a screenshot
-                const suspendedUrl = browser.runtime.getURL("src/suspended/suspended.html") +
-                    "?url=" + encodeURIComponent(tab.url) +
-                    "&title=" + encodedTitle +
-                    "&prefix=" + encodeURIComponent(SUSPENDED_PREFIX) +
-                    "&favicon=" + encodeURIComponent(tab.favIconUrl || '');
-
-                browser.tabs.update(tabId, { url: suspendedUrl }).then(() => {
-                    console.log("Tab suspended without screenshot:", tabId);
-                }).catch(error => {
-                    console.error("Error suspending tab:", tabId, error);
-                });
-            });
-        }).catch(error => {
-            console.error("Error checking exception domain:", error);
-        });
-    }).catch(error => {
-        console.error("Error getting tab:", tabId, error);
+// Load the suspension timer from storage
+function loadSuspensionTimer() {
+    browser.storage.local.get('suspensionTimer', function (data) {
+        SUSPEND_DELAY = (data.suspensionTimer || 1) * 60; // Convert minutes to seconds
+        console.log("Loaded suspension timer:", SUSPEND_DELAY);
     });
 }
 
-// Add this new function to handle messages
+// Call this function when the extension starts
+loadSuspensionTimer();
+
+// Event listeners
+browser.tabs.onActivated.addListener(activeInfo => {
+    console.log("Tab activated:", activeInfo.tabId);
+    resetTimer(activeInfo.tabId);
+    // Clear timer for the activated tab
+    clearTimeout(suspensionTimers[activeInfo.tabId]);
+    delete suspensionTimers[activeInfo.tabId];
+});
+
+browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === 'complete') {
+        console.log("Tab updated:", tabId);
+        resetTimer(tabId);
+    }
+});
+
+// Message listener
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    console.log("Received message:", message);
     if (message.action === "suspendTab") {
-        suspendTab(message.tabId);
+        console.log("Suspending current tab");
+        browser.tabs.query({ active: true, currentWindow: true }).then(tabs => {
+            if (tabs.length > 0) {
+                console.log("Found active tab:", tabs[0].id);
+                suspendTab(tabs[0].id)
+                    .then(() => {
+                        console.log("Tab suspension completed successfully");
+                        sendResponse({ success: true });
+                    })
+                    .catch(error => {
+                        console.error("Error during tab suspension:", error);
+                        sendResponse({ success: false, error: error.message });
+                    });
+            } else {
+                console.log("No active tab found");
+                sendResponse({ success: false, error: "No active tab found" });
+            }
+        }).catch(error => {
+            console.error("Error querying tabs:", error);
+            sendResponse({ success: false, error: error.message });
+        });
+        return true; // Indicates that we will send a response asynchronously
     } else if (message.action === "updateTimer") {
         SUSPEND_DELAY = message.value * 60; // Convert minutes to seconds
         console.log("Suspension timer updated:", SUSPEND_DELAY);
+        // Save the new timer value to storage
+        browser.storage.local.set({ suspensionTimer: message.value }, function () {
+            console.log("Timer saved to storage:", message.value);
+        });
         // Reset all existing timers
         Object.keys(suspensionTimers).forEach(tabId => {
             resetTimer(parseInt(tabId, 10));
@@ -192,27 +233,29 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-// Modify the setInterval function to include exception checking
+// Interval for checking tabs
 setInterval(() => {
     browser.tabs.query({}).then(tabs => {
         console.log("Checking tabs for suspension, total tabs:", tabs.length);
         tabs.forEach(tab => {
             console.log(`Tab ${tab.id}: active=${tab.active}, url=${tab.url}`);
 
-            let urlToCheck = tab.url;
-            if (tab.url.startsWith(browser.runtime.getURL("suspended.html"))) {
-                const suspendedUrl = new URL(tab.url);
-                urlToCheck = suspendedUrl.searchParams.get('url') || tab.url;
+            // If the tab is active, clear its timer and skip
+            if (tab.active) {
+                clearTimeout(suspensionTimers[tab.id]);
+                delete suspensionTimers[tab.id];
+                console.log("Tab is active, skipping:", tab.id);
+                return;
             }
 
-            isExceptionDomain(urlToCheck).then(isException => {
+            isExceptionDomain(tab.url).then(isException => {
                 if (!tab.active &&
-                    !urlToCheck.startsWith(browser.runtime.getURL("")) &&
-                    !urlToCheck.startsWith("about:") &&
-                    !urlToCheck.startsWith("chrome:") &&
-                    !urlToCheck.startsWith("moz-extension:") &&
-                    urlToCheck !== 'about:blank' &&
-                    urlToCheck !== 'about:newtab' &&
+                    !tab.url.startsWith(browser.runtime.getURL("")) &&
+                    !tab.url.startsWith("about:") &&
+                    !tab.url.startsWith("chrome:") &&
+                    !tab.url.startsWith("moz-extension:") &&
+                    tab.url !== 'about:blank' &&
+                    tab.url !== 'about:newtab' &&
                     !isException) {
                     if (!suspensionTimers[tab.id]) {
                         console.log("Setting new timer for tab:", tab.id);
@@ -227,3 +270,6 @@ setInterval(() => {
         });
     });
 }, 60000); // Check every minute
+
+// Initialize icon
+updateIcon(false);  // Set to inactive by default
