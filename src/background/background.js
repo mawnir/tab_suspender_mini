@@ -62,6 +62,7 @@ function suspendTab(tabId) {
                     tab.url.startsWith("moz-extension:") ||
                     tab.url === 'about:blank' ||
                     tab.url === 'about:newtab' ||
+                    tab.audible || // Add exception for tabs playing audio
                     isException) {
                     console.log("Tab not eligible for suspension:", tabId);
                     reject(new Error("Tab not eligible for suspension"));
@@ -151,18 +152,23 @@ function resetTimer(tabId) {
 function checkExceptionAndSetTimer(tabId, url) {
     isExceptionDomain(url).then(isException => {
         console.log(`Tab ${tabId} exception status:`, isException);
-        if (!url.startsWith(browser.runtime.getURL("")) &&
-            !url.startsWith("about:") &&
-            !url.startsWith("chrome:") &&
-            !url.startsWith("moz-extension:") &&
-            url !== 'about:blank' &&
-            url !== 'about:newtab' &&
-            !isException) {
-            suspensionTimers[tabId] = setTimeout(() => suspendTab(tabId), SUSPEND_DELAY * 1000);
-            console.log(`Timer set for tab ${tabId}`);
-        } else {
-            console.log("Tab not eligible for suspension timer:", tabId);
-        }
+        browser.tabs.get(tabId).then(tab => {
+            if (!url.startsWith(browser.runtime.getURL("")) &&
+                !url.startsWith("about:") &&
+                !url.startsWith("chrome:") &&
+                !url.startsWith("moz-extension:") &&
+                url !== 'about:blank' &&
+                url !== 'about:newtab' &&
+                !tab.audible && // Add check for audio playing
+                !isException) {
+                suspensionTimers[tabId] = setTimeout(() => suspendTab(tabId), SUSPEND_DELAY * 1000);
+                console.log(`Timer set for tab ${tabId}`);
+            } else {
+                console.log("Tab not eligible for suspension timer:", tabId);
+            }
+        }).catch(error => {
+            console.error("Error getting tab in checkExceptionAndSetTimer:", tabId, error);
+        });
     });
 }
 
@@ -238,18 +244,19 @@ setInterval(() => {
     browser.tabs.query({}).then(tabs => {
         console.log("Checking tabs for suspension, total tabs:", tabs.length);
         tabs.forEach(tab => {
-            console.log(`Tab ${tab.id}: active=${tab.active}, url=${tab.url}`);
+            console.log(`Tab ${tab.id}: active=${tab.active}, audible=${tab.audible}, url=${tab.url}`);
 
-            // If the tab is active, clear its timer and skip
-            if (tab.active) {
+            // If the tab is active or playing audio, clear its timer and skip
+            if (tab.active || tab.audible) {
                 clearTimeout(suspensionTimers[tab.id]);
                 delete suspensionTimers[tab.id];
-                console.log("Tab is active, skipping:", tab.id);
+                console.log("Tab is active or playing audio, skipping:", tab.id);
                 return;
             }
 
             isExceptionDomain(tab.url).then(isException => {
                 if (!tab.active &&
+                    !tab.audible && // Add check for audio playing
                     !tab.url.startsWith(browser.runtime.getURL("")) &&
                     !tab.url.startsWith("about:") &&
                     !tab.url.startsWith("chrome:") &&
