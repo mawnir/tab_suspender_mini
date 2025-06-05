@@ -39,4 +39,3 @@ This extension improves browser performance by automatically suspending inactive
 
 - **Audio Playback Protection:** Tabs playing audio will not be suspended to avoid interruptions.
 - **Browser-Specific URLs:** Ignores certain internal browser URLs (e.g., `about:`, `chrome:`, `moz-extension:`) to ensure smooth operation.
-
