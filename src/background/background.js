@@ -298,7 +298,6 @@ function resetTimer(tabId) {
     console.log("Resetting timer for tab:", tabId);
     clearTimeout(suspensionTimers[tabId]);
 
-    // Don't set new timers if suspension is disabled
     if (!suspensionEnabled) {
         console.log("Suspension is disabled, not setting timer for tab:", tabId);
         return;
@@ -310,24 +309,42 @@ function resetTimer(tabId) {
             return;
         }
 
-        // Check if the tab is already suspended
-        if (tab.url.startsWith(browser.runtime.getURL("suspended.html"))) {
-            // Extract the original URL from the suspended page's parameters
-            const suspendedUrl = new URL(tab.url);
-            const originalUrl = suspendedUrl.searchParams.get('url');
-            if (originalUrl) {
-                console.log("Tab is suspended, checking original URL:", originalUrl);
-                checkExceptionAndSetTimer(tabId, originalUrl);
+        const isSuspendedTab = tab.url.startsWith(browser.runtime.getURL("suspended.html"));
+
+        // For suspended tabs, we need to extract original URL
+        const effectiveUrl = isSuspendedTab ? (new URL(tab.url)).searchParams.get('url') : tab.url;
+
+        isExceptionDomain(effectiveUrl).then(isException => {
+            if (!tab.url.startsWith(browser.runtime.getURL("")) &&
+                !tab.url.startsWith("about:") &&
+                !tab.url.startsWith("chrome:") &&
+                !tab.url.startsWith("moz-extension:") &&
+                tab.url !== 'about:blank' &&
+                tab.url !== 'about:newtab' &&
+                !tab.audible &&
+                !isException) {
+
+                suspensionTimers[tabId] = setTimeout(() => {
+                    browser.tabs.get(tabId).then(latestTab => {
+                        // FINAL GUARD — check if still active
+                        if (latestTab.active) {
+                            console.log("Tab is still active at timeout, skipping suspension:", tabId);
+                            return;
+                        }
+                        suspendTab(tabId);
+                    });
+                }, SUSPEND_DELAY * 1000);
+
+                console.log(`Timer set for tab ${tabId}`);
             } else {
-                console.log("Unable to get original URL for suspended tab:", tabId);
+                console.log("Tab not eligible for suspension timer:", tabId);
             }
-        } else {
-            checkExceptionAndSetTimer(tabId, tab.url);
-        }
+        });
     }).catch(error => {
-        console.error("Error getting tab in resetTimer:", tabId, error);
+        console.error("Error in resetTimer:", error);
     });
 }
+
 
 function checkExceptionAndSetTimer(tabId, url) {
     // Don't set timers if suspension is disabled
