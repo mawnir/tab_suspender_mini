@@ -7,13 +7,23 @@
         "tabs",
         "<all_urls>",
         "activeTab",
-        "storage"
+        "storage",
+        "contextMenus"
     ],
     "background": {
         "scripts": [
             "src/background/background.js"
         ],
         "persistent": true
+    },
+    "commands": {
+        "suspend-tab": {
+            "suggested_key": {
+                "default": "Ctrl+Shift+X",
+                "mac": "Command+Shift+X"
+            },
+            "description": "Suspend the current tab"
+        }
     },
     "browser_action": {
         "default_popup": "src/popup/popup.html",
