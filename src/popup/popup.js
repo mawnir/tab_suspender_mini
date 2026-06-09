@@ -1,4 +1,5 @@
 document.addEventListener('DOMContentLoaded', function () {
+    recoverPendingUrls();
     const domainInput = document.getElementById('domainInput');
     const addButton = document.getElementById('addDomain');
     const exceptionList = document.getElementById('exceptionList');
@@ -9,6 +10,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const hideInfoBtn = document.getElementById('hideInfoBtn');
 
     const suspensionToggle = document.getElementById('suspensionToggle');
+    const screenshotToggle = document.getElementById('screenshotToggle');
 
     // Load existing toggle state
     browser.storage.local.get(['suspensionEnabled', 'screenshotsEnabled'], function (data) {
@@ -227,3 +229,41 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 });
+
+function recoverPendingUrls() {
+    browser.storage.local.get(null).then(allData => {
+        const pending = Object.entries(allData)
+            .filter(([key]) => key.startsWith('pending_suspend_'))
+            .map(([key, value]) => ({ key, tabId: key.replace('pending_suspend_', ''), ...value }));
+
+        if (pending.length === 0) return;
+
+        const container = document.getElementById('recovery-container');
+        const list = document.getElementById('recovery-list');
+        container.style.display = 'block';
+
+        pending.forEach(({ key, tabId, url, title }) => {
+            const li = document.createElement('li');
+            li.style.cssText = 'display:flex; justify-content:space-between; align-items:center; background:var(--secondary); padding:6px 8px; border-radius:4px; margin-bottom:4px;';
+
+            const label = document.createElement('span');
+            label.textContent = title || url;
+            label.title = url;
+            label.style.cssText = 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:220px; font-size:12px;';
+
+            const btn = document.createElement('button');
+            btn.textContent = 'Restore';
+            btn.style.cssText = 'background:rgb(93,24,149); font-size:12px; padding:4px 8px; flex-shrink:0;';
+            btn.addEventListener('click', () => {
+                browser.tabs.create({ url });
+                browser.storage.local.remove(key);
+                li.remove();
+                if (list.children.length === 0) container.style.display = 'none';
+            });
+
+            li.appendChild(label);
+            li.appendChild(btn);
+            list.appendChild(li);
+        });
+    });
+}

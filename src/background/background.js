@@ -100,6 +100,17 @@ function updateIcon(active) {
     browser.browserAction.setIcon({ path });
 }
 
+const saveOriginalUrl = (tabId, url, title) => {
+    return browser.storage.local.set({
+        [`pending_suspend_${tabId}`]: { url, title, savedAt: Date.now() }
+    });
+};
+
+// Clean up after successful suspension
+const clearPendingUrl = (tabId) => {
+    browser.storage.local.remove(`pending_suspend_${tabId}`);
+};
+
 function suspendOtherTabs() {
     console.log("Suspending all other tabs");
 
@@ -236,29 +247,38 @@ function suspendTab(tabId) {
                 console.log("Encoded title:", encodedTitle);
 
                 // Function to create suspended URL
-                const createSuspendedUrl = (screenshotUrl = '') => {
-                    let suspendedUrl = browser.runtime.getURL("src/suspended/suspended.html") +
-                        "?url=" + encodeURIComponent(tab.url) +
-                        "&title=" + encodedTitle +
-                        "&prefix=" + encodeURIComponent(SUSPENDED_PREFIX) +
-                        "&favicon=" + encodeURIComponent(tab.favIconUrl || '');
+                const createSuspendedUrl = async (screenshotUrl = '') => {
+                    const base = browser.runtime.getURL("src/suspended/suspended.html");
 
                     if (screenshotUrl) {
-                        suspendedUrl += "&screenshot=" + encodeURIComponent(screenshotUrl);
+                        await browser.storage.local.set({ [`screenshot_${tabId}`]: screenshotUrl });
                     }
 
-                    return suspendedUrl;
+                    const meta = [
+                        encodeURIComponent(tab.title || ''),
+                        encodeURIComponent(tab.favIconUrl || ''),
+                        encodeURIComponent(SUSPENDED_PREFIX),
+                        tabId
+                    ].join('|');
+
+                    return `${base}#${meta}@${tab.url}`;
                 };
 
                 // Function to update tab with suspended URL
-                const updateTabToSuspended = (suspendedUrl) => {
-                    browser.tabs.update(tabId, { url: suspendedUrl }).then(() => {
-                        console.log("Tab successfully suspended:", tabId);
-                        updateIcon(true);
-                        resolve();
-                    }).catch(error => {
-                        console.error("Error updating tab:", tabId, error);
-                        reject(error);
+                const updateTabToSuspended = async (screenshotUrl) => {
+                    const suspendedUrl = await createSuspendedUrl(screenshotUrl);
+
+                    saveOriginalUrl(tabId, tab.url, tab.title).then(() => {
+                        browser.tabs.update(tabId, { url: suspendedUrl }).then(() => {
+                            console.log("Tab successfully suspended:", tabId);
+                            updateIcon(true);
+                            clearPendingUrl(tabId);
+                            resolve();
+                        }).catch(error => {
+                            console.error("Error updating tab:", tabId, error);
+                            clearPendingUrl(tabId);
+                            reject(error);
+                        });
                     });
                 };
 
@@ -267,21 +287,15 @@ function suspendTab(tabId) {
                     console.log("Attempting to capture screenshot for tab:", tabId);
                     browser.tabs.captureTab(tabId, { format: 'jpeg', quality: 50 }).then(screenshotUrl => {
                         console.log("Screenshot captured for tab:", tabId);
-                        const suspendedUrl = createSuspendedUrl(screenshotUrl);
-                        console.log("Suspended URL with screenshot:", suspendedUrl);
-                        updateTabToSuspended(suspendedUrl);
+                        updateTabToSuspended(screenshotUrl);
                     }).catch(error => {
                         console.error("Error capturing screenshot:", error);
                         // If screenshot capture fails, suspend the tab without a screenshot
-                        const suspendedUrl = createSuspendedUrl();
-                        console.log("Suspended URL without screenshot (fallback):", suspendedUrl);
-                        updateTabToSuspended(suspendedUrl);
+                        updateTabToSuspended();
                     });
                 } else {
                     console.log("Screenshots disabled, suspending without screenshot:", tabId);
-                    const suspendedUrl = createSuspendedUrl();
-                    console.log("Suspended URL without screenshot:", suspendedUrl);
-                    updateTabToSuspended(suspendedUrl);
+                    updateTabToSuspended();
                 }
             }).catch(error => {
                 console.error("Error checking exception domain:", error);
@@ -309,10 +323,10 @@ function resetTimer(tabId) {
             return;
         }
 
-        const isSuspendedTab = tab.url.startsWith(browser.runtime.getURL("suspended.html"));
+        const isSuspendedTab = tab.url.startsWith(browser.runtime.getURL("src/suspended/suspended.html"));
 
         // For suspended tabs, we need to extract original URL
-        const effectiveUrl = isSuspendedTab ? (new URL(tab.url)).searchParams.get('url') : tab.url;
+        const effectiveUrl = isSuspendedTab ? tab.url.slice(tab.url.indexOf('@') + 1) : tab.url;
 
         isExceptionDomain(effectiveUrl).then(isException => {
             if (!tab.url.startsWith(browser.runtime.getURL("")) &&

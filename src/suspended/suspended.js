@@ -1,33 +1,56 @@
 function initSuspendedPage() {
     try {
-        const params = new URLSearchParams(window.location.search);
-        const title = decodeURIComponent(params.get('title') || '');
-        const url = decodeURIComponent(params.get('url') || '');
-        const prefix = decodeURIComponent(params.get('prefix') || '');
-        const favicon = decodeURIComponent(params.get('favicon') || '');
-        const screenshot = decodeURIComponent(params.get('screenshot') || '');
+        const hash = window.location.hash.slice(1);
+        const atIndex = hash.indexOf('@');
+        const metaPart = hash.slice(0, atIndex);
+        const url = hash.slice(atIndex + 1);
+
+        const [encodedTitle, encodedFavicon, encodedPrefix, tabId] = metaPart.split('|');
+
+        const title = decodeURIComponent(encodedTitle || '');
+        const favicon = decodeURIComponent(encodedFavicon || '');
+        const prefix = decodeURIComponent(encodedPrefix || '');
 
         document.getElementById('pageTitle').textContent = prefix + title;
         document.getElementById('tabTitle').textContent = title;
-        document.getElementById('url').textContent = url;
+
+        let displayUrl = url;
+        try {
+            const urlObj = new URL(url);
+            displayUrl = urlObj.hostname + (urlObj.pathname === '/' ? '' : urlObj.pathname);
+            displayUrl = decodeURIComponent(displayUrl);
+            if (displayUrl.length > 60) {
+                displayUrl = displayUrl.substring(0, 57) + '...';
+            }
+        } catch (e) {
+            console.error("Error parsing URL for display:", e);
+        }
+
+        document.getElementById('url').textContent = displayUrl;
         document.getElementById('url').href = url;
 
-        // Set the favicon
         if (favicon) {
             document.getElementById('favicon').href = favicon;
         }
 
-        // Set the background image
-        if (screenshot) {
-            document.body.style.backgroundImage = `url(${screenshot})`;
+        // Fetch screenshot from storage instead of URL
+        if (tabId) {
+            browser.storage.local.get(`screenshot_${tabId}`).then(data => {
+                const screenshot = data[`screenshot_${tabId}`];
+                if (screenshot) {
+                    document.body.style.backgroundImage = `url(${screenshot})`;
+                    // Clean up after loading
+                    browser.storage.local.remove(`screenshot_${tabId}`);
+                }
+            });
         }
 
-        // Add click event to reload the original page
         document.body.addEventListener('click', () => {
             window.location.href = url;
         });
+
     } catch (error) {
-        console.error("Error in suspended.js script:", error);
+        console.error("Error in suspended.js:", error);
     }
 }
 
