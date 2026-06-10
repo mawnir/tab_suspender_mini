@@ -256,7 +256,7 @@ function suspendTab(tabId) {
 
                     const meta = [
                         encodeURIComponent(tab.title || ''),
-                        encodeURIComponent(tab.favIconUrl || ''),
+                        '',
                         encodeURIComponent(SUSPENDED_PREFIX),
                         tabId
                     ].join('|');

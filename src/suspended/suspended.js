@@ -35,13 +35,18 @@ function initSuspendedPage() {
 
         // Fetch screenshot from storage instead of URL
         if (tabId) {
-            browser.storage.local.get(`screenshot_${tabId}`).then(data => {
+            browser.storage.local.get([`screenshot_${tabId}`, `favicon_${tabId}`]).then(data => {
                 const screenshot = data[`screenshot_${tabId}`];
+                const favicon = data[`favicon_${tabId}`];
+
                 if (screenshot) {
                     document.body.style.backgroundImage = `url(${screenshot})`;
-                    // Clean up after loading
-                    browser.storage.local.remove(`screenshot_${tabId}`);
                 }
+                if (favicon) {
+                    document.getElementById('favicon').href = favicon;
+                }
+
+                browser.storage.local.remove([`screenshot_${tabId}`, `favicon_${tabId}`]);
             });
         }
 
