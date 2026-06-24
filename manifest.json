@@ -23,6 +23,13 @@
                 "mac": "Command+Shift+X"
             },
             "description": "Suspend the current tab"
+        },
+        "suspend-other-tabs": {
+            "suggested_key": {
+                "default": "Ctrl+Shift+Y",
+                "mac": "Command+Shift+Y"
+            },
+            "description": "Suspend all other tabs"
         }
     },
     "browser_action": {

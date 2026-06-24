@@ -54,6 +54,17 @@ function initSuspendedPage() {
             window.location.href = url;
         });
 
+        // Detect extension reload/unload to prevent tab from being closed by Firefox/Chrome
+        try {
+            const port = browser.runtime.connect({ name: "suspended-tab" });
+            port.onDisconnect.addListener(() => {
+                console.log("Extension disconnected, navigating back to original URL to prevent tab closure");
+                window.location.href = url;
+            });
+        } catch (e) {
+            console.error("Failed to connect to background page:", e);
+        }
+
     } catch (error) {
         console.error("Error in suspended.js:", error);
     }

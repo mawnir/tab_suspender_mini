@@ -10,14 +10,17 @@ document.addEventListener('DOMContentLoaded', function () {
     const hideInfoBtn = document.getElementById('hideInfoBtn');
 
     const suspensionToggle = document.getElementById('suspensionToggle');
+    const autoSuspensionToggle = document.getElementById('autoSuspensionToggle');
     const screenshotToggle = document.getElementById('screenshotToggle');
 
     // Load existing toggle state
-    browser.storage.local.get(['suspensionEnabled', 'screenshotsEnabled'], function (data) {
+    browser.storage.local.get(['suspensionEnabled', 'screenshotsEnabled', 'autoSuspensionEnabled'], function (data) {
         suspensionToggle.checked = data.suspensionEnabled !== false; // default to true
         screenshotToggle.checked = data.screenshotsEnabled !== false; // default to true
+        autoSuspensionToggle.checked = data.autoSuspensionEnabled !== false; // default to true
         console.log("Loaded suspension enabled state:", suspensionToggle.checked);
         console.log("Loaded screenshots enabled state:", screenshotToggle.checked);
+        console.log("Loaded auto suspension state:", autoSuspensionToggle.checked);
     });
 
     // Handle toggle change
@@ -38,6 +41,18 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 
+    // Handle auto-suspension toggle change
+    autoSuspensionToggle.addEventListener('change', function () {
+        const isEnabled = autoSuspensionToggle.checked;
+        browser.storage.local.set({ autoSuspensionEnabled: isEnabled }, function () {
+            console.log("Auto suspension state saved:", isEnabled);
+            browser.runtime.sendMessage({
+                action: "toggleAutoSuspension",
+                enabled: isEnabled
+            });
+        });
+    });
+
     // Handle screenshot toggle change
     screenshotToggle.addEventListener('change', function () {
         const isEnabled = screenshotToggle.checked;
@@ -50,7 +65,6 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 
-    // 2. Replace the timer loading section
     // Load existing timer setting
     browser.storage.local.get('suspensionTimer', function (data) {
         const totalMinutes = data.suspensionTimer || 1;
@@ -58,16 +72,13 @@ document.addEventListener('DOMContentLoaded', function () {
         const minutes = totalMinutes % 60;
 
         suspensionHoursInput.value = hours;
-        suspensionMinutesInput.value = minutes || 1; // Ensure at least 1 minute
+        suspensionMinutesInput.value = minutes;
     });
 
     // Save timer setting
-
-    // 3. Replace the timer saving section
-    // Save timer setting
     saveTimerButton.addEventListener('click', function () {
         const hoursValue = parseInt(suspensionHoursInput.value, 10) || 0;
-        const minutesValue = parseInt(suspensionMinutesInput.value, 10) || 1;
+        const minutesValue = parseInt(suspensionMinutesInput.value, 10) || 0;
 
         // Validate inputs
         if (hoursValue < 0 || hoursValue > 23) {
@@ -75,8 +86,8 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
 
-        if (minutesValue < 1 || minutesValue > 59) {
-            alert('Minutes must be between 1 and 59');
+        if (minutesValue < 0 || minutesValue > 59) {
+            alert('Minutes must be between 0 and 59');
             return;
         }
 
@@ -104,20 +115,28 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 
-
-    // 4. Add input validation listeners (optional but recommended)
+    // Input validation listeners
     suspensionHoursInput.addEventListener('input', function () {
         const value = parseInt(this.value, 10);
         if (value < 0) this.value = 0;
         if (value > 23) this.value = 23;
+        
+        // Adjust minutes if hours changes to 0 and minutes is 0
+        const minutes = parseInt(suspensionMinutesInput.value, 10) || 0;
+        if (value === 0 && minutes === 0) {
+            suspensionMinutesInput.value = 1;
+        }
     });
 
     suspensionMinutesInput.addEventListener('input', function () {
-        const value = parseInt(this.value, 10);
-        const hours = parseInt(suspensionHoursInput.value, 10) || 0;
-
-        if (value < 1) this.value = 1;
+        let value = parseInt(this.value, 10);
+        if (isNaN(value) || value < 0) {
+            this.value = 0;
+            value = 0;
+        }
         if (value > 59) this.value = 59;
+
+        const hours = parseInt(suspensionHoursInput.value, 10) || 0;
 
         // If hours is 0, ensure minutes is at least 1
         if (hours === 0 && value < 1) {
