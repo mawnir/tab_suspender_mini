@@ -234,6 +234,23 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
 
+    // Add event listener for the unsuspend other tabs button
+    const unsuspendOtherTabsButton = document.getElementById('unsuspendOtherTabs');
+    if (unsuspendOtherTabsButton) {
+        unsuspendOtherTabsButton.addEventListener('click', () => {
+            browser.runtime.sendMessage({ action: "unsuspendOtherTabs" })
+                .then(response => {
+                    if (response.success) {
+                        console.log(`Restored ${response.restored} tabs, skipped ${response.skipped} tabs`);
+                    }
+                    window.close(); // Close the popup after sending the message
+                })
+                .catch(error => {
+                    console.error("Error sending message:", error);
+                });
+        });
+    }
+
     // Load visibility state from storage
     browser.storage.local.get('showShortcutInfo', function (data) {
         if (data.showShortcutInfo === false) {

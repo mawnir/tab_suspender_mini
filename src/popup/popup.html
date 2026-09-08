@@ -231,6 +231,16 @@
             background: linear-gradient(135deg, var(--danger-hover) 0%, var(--danger) 100%);
         }
 
+        #unsuspendOtherTabs {
+            flex: 1;
+            background: linear-gradient(135deg, #10b981 0%, #047857 100%);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
+        }
+
+        #unsuspendOtherTabs:hover {
+            background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+        }
+
         .input-row {
             display: flex;
             align-items: center;
@@ -386,6 +396,10 @@
     <div class="button-row">
         <button id="suspendCurrentTab">Suspend Tab</button>
         <button id="suspendOtherTabs">Suspend Others</button>
+    </div>
+
+    <div class="button-row">
+        <button id="unsuspendOtherTabs">Unsuspend Others</button>
     </div>
 
     <div class="card">

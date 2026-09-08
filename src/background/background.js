@@ -1,51 +1,405 @@
 console.log("Tab Suspender extension loaded");
 
-let SUSPEND_DELAY = 60; // default 1 minute
-const SUSPENDED_PREFIX = "💤 ";
-let suspensionTimers = {};
-let suspensionEnabled = true; // default to enabled
-let screenshotsEnabled = true; // default to enabled
-let autoSuspensionEnabled = true; // default to enabled
-let activeTabs = {}; // track active tab per window
+// Set true while debugging. Keep false by default: per-tab logging is what
+// kills performance with hundreds/thousands of tabs (I/O + string building
+// on every event/sweep).
+const DEBUG = false;
+const debug = (...args) => { if (DEBUG) console.log(...args); };
 
-// Load suspension enabled state from storage
-function loadSuspensionState() {
-    browser.storage.local.get(['suspensionEnabled', 'screenshotsEnabled', 'autoSuspensionEnabled'], function (data) {
-        suspensionEnabled = data.suspensionEnabled !== false; // default to true
-        screenshotsEnabled = data.screenshotsEnabled !== false; // default to true
-        autoSuspensionEnabled = data.autoSuspensionEnabled !== false; // default to true
-        console.log("Loaded suspension enabled state:", suspensionEnabled);
-        console.log("Loaded screenshots enabled state:", screenshotsEnabled);
-        console.log("Loaded auto suspension state:", autoSuspensionEnabled);
-        updateIcon(suspensionEnabled);
+let SUSPEND_DELAY = 60; // seconds; set from storage (minutes -> seconds)
+const SUSPENDED_PREFIX = "💤 ";
+const SWEEP_INTERVAL_MS = 30000; // single sweeper, no per-tab setTimeout
+const MAX_SUSPEND_PER_SWEEP = 10; // batch cap so 2000 due tabs don't freeze the browser
+
+let suspensionEnabled = true;
+let screenshotsEnabled = true;
+let autoSuspensionEnabled = true;
+let activeTabs = {}; // windowId -> tabId
+let lastSeen = {}; // tabId -> timestamp (ms) when it became inactive & eligible
+let cachedExceptions = []; // normalized strings, loaded once + kept via onChanged
+let suspendedTabsCache = null; // in-memory copy of {tabId: {...}}, single writer
+
+function normalizeException(s) {
+    return (s || "").replace(/^(https?:\/\/)?(www\.)?/, "").replace(/\/$/, "").toLowerCase();
+}
+
+// Synchronous, in-memory check. Old code did storage.local.get per tab per
+// sweep — that was the real scaling bottleneck, not setTimeout.
+function isExceptionCached(url) {
+    if (!url || cachedExceptions.length === 0) return false;
+    let domain;
+    try {
+        domain = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+    } catch (e) {
+        return false;
+    }
+    if (!domain) return false;
+    for (const ex of cachedExceptions) {
+        if (!ex) continue;
+        if (domain.includes(ex) || ex.includes(domain)) return true;
+    }
+    return false;
+}
+
+function getEffectiveUrl(tab) {
+    if (!tab || !tab.url) return "";
+    const prefix = browser.runtime.getURL("src/suspended/suspended.html");
+    if (tab.url.startsWith(prefix)) {
+        const at = tab.url.indexOf("@");
+        return at >= 0 ? tab.url.slice(at + 1) : "";
+    }
+    return tab.url;
+}
+
+function isEligibleForAutoSuspend(tab, effectiveUrl) {
+    if (!tab || tab.active || tab.audible) return false;
+    if (!tab.url) return false;
+    // Raw-URL check first: never schedule anything already internal or
+    // already suspended (suspended pages live under the extension origin).
+    const extPrefix = browser.runtime.getURL("");
+    if (tab.url.startsWith(extPrefix) ||
+        tab.url.startsWith("about:") ||
+        tab.url.startsWith("chrome:") ||
+        tab.url.startsWith("moz-extension:") ||
+        tab.url === "about:blank" ||
+        tab.url === "about:newtab") {
+        return false;
+    }
+    // Exception check runs against the effective (original) URL.
+    const url = effectiveUrl !== undefined ? effectiveUrl : getEffectiveUrl(tab);
+    if (!url) return false;
+    return !isExceptionCached(url);
+}
+
+function touch(tabId, now) {
+    lastSeen[tabId] = now === undefined ? Date.now() : now;
+}
+
+function untouch(tabId) {
+    delete lastSeen[tabId];
+}
+
+function clearAllTimestamps() {
+    lastSeen = {};
+}
+
+function updateIcon(active) {
+    const path = active ? "icons/icon_active.png" : "icons/icon_inactive.png";
+    browser.browserAction.setIcon({ path });
+}
+
+// ---- storage (single initial read, then cache + onChanged) ----
+
+function loadInitialState() {
+    browser.storage.local.get(
+        ["suspensionEnabled", "screenshotsEnabled", "autoSuspensionEnabled", "suspensionTimer", "exceptions", "suspendedTabs"],
+        (data) => {
+            suspensionEnabled = data.suspensionEnabled !== false;
+            screenshotsEnabled = data.screenshotsEnabled !== false;
+            autoSuspensionEnabled = data.autoSuspensionEnabled !== false;
+            const totalMinutes = data.suspensionTimer || 1;
+            SUSPEND_DELAY = totalMinutes * 60;
+            cachedExceptions = (data.exceptions || []).map(normalizeException);
+            suspendedTabsCache = data.suspendedTabs || {};
+            updateIcon(suspensionEnabled);
+            seedAllTabs();
+        }
+    );
+}
+
+browser.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if (changes.suspensionEnabled) suspensionEnabled = changes.suspensionEnabled.newValue !== false;
+    if (changes.screenshotsEnabled) screenshotsEnabled = changes.screenshotsEnabled.newValue !== false;
+    if (changes.autoSuspensionEnabled) {
+        autoSuspensionEnabled = changes.autoSuspensionEnabled.newValue !== false;
+        if (!autoSuspensionEnabled) clearAllTimestamps();
+        else seedAllTabs();
+    }
+    if (changes.suspensionTimer && changes.suspensionTimer.newValue) {
+        SUSPEND_DELAY = changes.suspensionTimer.newValue * 60;
+        // No timer reset needed: sweeper compares Date.now() - lastSeen lazily.
+    }
+    if (changes.exceptions) {
+        cachedExceptions = (changes.exceptions.newValue || []).map(normalizeException);
+    }
+    if (changes.suspendedTabs) {
+        suspendedTabsCache = changes.suspendedTabs.newValue || {};
+    }
+});
+
+function saveSuspendedTabsCache() {
+    return browser.storage.local.set({ suspendedTabs: suspendedTabsCache || {} });
+}
+
+const saveOriginalUrl = (tabId, url, title) => {
+    return browser.storage.local.set({
+        [`pending_suspend_${tabId}`]: { url, title, savedAt: Date.now() }
+    });
+};
+
+const clearPendingUrl = (tabId) => {
+    browser.storage.local.remove(`pending_suspend_${tabId}`);
+};
+
+const addSuspendedTabToStorage = (tabId, url, title, windowId) => {
+    // Single-writer via in-memory cache: avoids read-modify-write races when
+    // suspending a batch of tabs.
+    if (suspendedTabsCache === null) suspendedTabsCache = {};
+    suspendedTabsCache[tabId] = { url, title, windowId, timestamp: Date.now() };
+    return saveSuspendedTabsCache();
+};
+
+const removeSuspendedTabFromStorage = (tabId) => {
+    if (suspendedTabsCache !== null) {
+        if (suspendedTabsCache[tabId]) {
+            delete suspendedTabsCache[tabId];
+            return saveSuspendedTabsCache();
+        }
+        return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+        browser.storage.local.get("suspendedTabs", (data) => {
+            const tabs = data.suspendedTabs || {};
+            if (tabs[tabId]) {
+                delete tabs[tabId];
+                browser.storage.local.set({ suspendedTabs: tabs }, resolve);
+            } else {
+                resolve();
+            }
+        });
+    });
+};
+
+// ---- core suspend ----
+
+async function suspendTab(tabId) {
+    if (!suspensionEnabled) throw new Error("Suspension is disabled");
+
+    const tab = await browser.tabs.get(tabId);
+    if (!tab.url) throw new Error("Tab has no URL");
+
+    const effectiveUrl = getEffectiveUrl(tab);
+    const prefix = browser.runtime.getURL("");
+    if (tab.audible ||
+        tab.url.startsWith(prefix) ||
+        tab.url.startsWith("about:") ||
+        tab.url.startsWith("chrome:") ||
+        tab.url.startsWith("moz-extension:") ||
+        tab.url === "about:blank" ||
+        tab.url === "about:newtab" ||
+        isExceptionCached(effectiveUrl)) {
+        untouch(tabId);
+        throw new Error("Tab not eligible for suspension");
+    }
+
+    const createSuspendedUrl = async (screenshotUrl = "") => {
+        const base = browser.runtime.getURL("src/suspended/suspended.html");
+        if (screenshotUrl) {
+            await browser.storage.local.set({ [`screenshot_${tabId}`]: screenshotUrl });
+        }
+        const meta = [
+            encodeURIComponent(tab.title || ""),
+            "",
+            encodeURIComponent(SUSPENDED_PREFIX),
+            tabId
+        ].join("|");
+        return `${base}#${meta}@${tab.url}`;
+    };
+
+    const updateTabToSuspended = async (screenshotUrl) => {
+        const suspendedUrl = await createSuspendedUrl(screenshotUrl);
+        await saveOriginalUrl(tabId, tab.url, tab.title);
+        await addSuspendedTabToStorage(tabId, tab.url, tab.title, tab.windowId);
+        try {
+            await browser.tabs.update(tabId, { url: suspendedUrl });
+        } catch (error) {
+            await removeSuspendedTabFromStorage(tabId);
+            await clearPendingUrl(tabId);
+            throw error;
+        }
+        untouch(tabId);
+        clearPendingUrl(tabId);
+    };
+
+    if (screenshotsEnabled) {
+        try {
+            const screenshotUrl = await browser.tabs.captureTab(tabId, { format: "jpeg", quality: 50 });
+            await updateTabToSuspended(screenshotUrl);
+        } catch (e) {
+            // Screenshot failure must not block suspension (bulk sweeps especially).
+            await updateTabToSuspended();
+        }
+    } else {
+        await updateTabToSuspended();
+    }
+}
+
+// Sequential + capped: captureTab + tabs.update for hundreds of tabs at once
+// freezes the browser. Callers (sweep, suspend-other) share this helper.
+async function suspendBatch(tabs, reason) {
+    let suspended = 0;
+    let skipped = 0;
+    for (const tab of tabs) {
+        try {
+            await suspendTab(tab.id);
+            suspended++;
+        } catch (e) {
+            skipped++;
+            debug(`[${reason}] skip tab ${tab.id}:`, e.message);
+        }
+    }
+    if (suspended > 0 || DEBUG) console.log(`[${reason}] suspended=${suspended} skipped=${skipped}`);
+    return { suspended, skipped };
+}
+
+function suspendOtherTabs() {
+    if (!suspensionEnabled) return Promise.reject(new Error("Suspension is disabled"));
+
+    return browser.tabs.query({ currentWindow: true }).then(async (tabs) => {
+        const activeTab = tabs.find((tab) => tab.active);
+        if (!activeTab) throw new Error("No active tab found");
+
+        const prefix = browser.runtime.getURL("");
+        const candidates = tabs.filter((tab) =>
+            tab.id !== activeTab.id &&
+            !tab.audible &&
+            tab.url &&
+            !tab.url.startsWith(prefix) &&
+            !tab.url.startsWith("about:") &&
+            !tab.url.startsWith("chrome:") &&
+            !tab.url.startsWith("moz-extension:") &&
+            tab.url !== "about:blank" &&
+            tab.url !== "about:newtab" &&
+            !isExceptionCached(getEffectiveUrl(tab))
+        );
+
+        if (candidates.length === 0) return { suspended: 0, skipped: tabs.length - 1 };
+        // Manual action: suspend everything requested, sequentially (no cap).
+        // The automatic sweep is the one capped per interval.
+        return suspendBatch(candidates, "suspend-other");
     });
 }
 
-// Call this function when the extension starts
-loadSuspensionState();
+// ---- unsuspend ----
 
-// Initialize active tabs for current windows
-browser.tabs.query({ active: true }).then(tabs => {
-    tabs.forEach(tab => {
+function isSuspendedTabUrl(url) {
+    return !!url && url.startsWith(browser.runtime.getURL("src/suspended/suspended.html"));
+}
+
+function extractOriginalUrl(suspendedUrl) {
+    const at = suspendedUrl.indexOf("@");
+    return at >= 0 ? suspendedUrl.slice(at + 1) : "";
+}
+
+async function unsuspendTab(tabId) {
+    const tab = await browser.tabs.get(tabId);
+    if (!isSuspendedTabUrl(tab.url)) throw new Error("Tab is not suspended");
+    const originalUrl = extractOriginalUrl(tab.url);
+    if (!originalUrl) throw new Error("Suspended tab has no original URL");
+    await browser.tabs.update(tabId, { url: originalUrl });
+    await removeSuspendedTabFromStorage(tabId);
+    // Clean up leftovers the suspended page would otherwise remove on load.
+    browser.storage.local.remove([`screenshot_${tabId}`, `favicon_${tabId}`, `pending_suspend_${tabId}`]);
+    // Restored tab starts aging for auto-suspension from now.
+    if (suspensionEnabled && autoSuspensionEnabled) touch(tabId);
+    else untouch(tabId);
+}
+
+async function unsuspendOtherTabs() {
+    const tabs = await browser.tabs.query({ currentWindow: true });
+    const activeTab = tabs.find((tab) => tab.active);
+    if (!activeTab) throw new Error("No active tab found");
+    const candidates = tabs.filter((tab) => tab.id !== activeTab.id && isSuspendedTabUrl(tab.url));
+    let restored = 0;
+    let skipped = 0;
+    // Sequential: each restore triggers a real page load; firing hundreds
+    // at once spikes CPU/memory.
+    for (const tab of candidates) {
+        try {
+            await unsuspendTab(tab.id);
+            restored++;
+        } catch (e) {
+            skipped++;
+            debug(`[unsuspend-other] skip tab ${tab.id}:`, e.message);
+        }
+    }
+    if (restored > 0 || DEBUG) console.log(`[unsuspend-other] restored=${restored} skipped=${skipped}`);
+    return { restored, skipped };
+}
+
+// ---- timestamp seeding + single sweeper (replaces per-tab setTimeout) ----
+
+async function seedAllTabs() {
+    if (!suspensionEnabled || !autoSuspensionEnabled) return;
+    try {
+        const tabs = await browser.tabs.query({});
+        const now = Date.now();
+        for (const tab of tabs) {
+            if (isEligibleForAutoSuspend(tab)) {
+                if (lastSeen[tab.id] === undefined) touch(tab.id, now);
+            } else {
+                untouch(tab.id);
+            }
+        }
+    } catch (e) {
+        console.error("seedAllTabs failed:", e);
+    }
+}
+
+async function sweepOnce() {
+    if (!suspensionEnabled || !autoSuspensionEnabled) return;
+    let tabs;
+    try {
+        tabs = await browser.tabs.query({});
+    } catch (e) {
+        console.error("sweep query failed:", e);
+        return;
+    }
+    const now = Date.now();
+    const delayMs = SUSPEND_DELAY * 1000;
+    const due = [];
+    for (const tab of tabs) {
+        if (tab.active || tab.audible) {
+            if (lastSeen[tab.id] !== undefined) untouch(tab.id);
+            continue;
+        }
+        if (!isEligibleForAutoSuspend(tab)) {
+            if (lastSeen[tab.id] !== undefined) untouch(tab.id);
+            continue;
+        }
+        if (lastSeen[tab.id] === undefined) {
+            // Seen but never timestamped (new tab, startup) — start aging now,
+            // don't suspend immediately to avoid mass-suspend on reload.
+            touch(tab.id, now);
+            continue;
+        }
+        if (now - lastSeen[tab.id] >= delayMs) due.push(tab);
+    }
+    if (due.length === 0) {
+        debug(`sweep: ${tabs.length} tabs, none due`);
+        return;
+    }
+    // Oldest first, capped per sweep so the browser stays responsive.
+    due.sort((a, b) => (lastSeen[a.id] || 0) - (lastSeen[b.id] || 0));
+    await suspendBatch(due.slice(0, MAX_SUSPEND_PER_SWEEP), "sweep");
+}
+
+// ---- events: just maintain timestamps, never create timers ----
+
+browser.tabs.query({ active: true }).then((tabs) => {
+    tabs.forEach((tab) => {
         activeTabs[tab.windowId] = tab.id;
     });
 });
 
 browser.commands.onCommand.addListener((command) => {
     if (command === "suspend-tab" && suspensionEnabled) {
-        console.log("Keyboard shortcut triggered: suspend-tab");
-        browser.tabs.query({ active: true, currentWindow: true }).then(tabs => {
-            if (tabs.length > 0) {
-                suspendTab(tabs[0].id);
-            }
+        browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+            if (tabs.length > 0) suspendTab(tabs[0].id).catch((e) => debug("suspend-tab:", e.message));
         });
     } else if (command === "suspend-other-tabs" && suspensionEnabled) {
-        console.log("Keyboard shortcut triggered: suspend-other-tabs");
-        suspendOtherTabs().then(result => {
-            console.log(`Suspended ${result.suspended} tabs, skipped ${result.skipped} tabs`);
-        }).catch(error => {
-            console.error("Error suspending other tabs:", error);
-        });
+        suspendOtherTabs().catch((error) => console.error("Error suspending other tabs:", error));
     }
 });
 
@@ -68,693 +422,183 @@ browser.contextMenus.create({
 });
 
 browser.contextMenus.onClicked.addListener((info, tab) => {
-    if (info.menuItemId === "suspend-tab" && tab && tab.id && suspensionEnabled) {
-        suspendTab(tab.id).catch(error => {
-            console.error("Error suspending tab from context menu:", error);
-        });
-    } else if (info.menuItemId === "suspend-other-tabs" && suspensionEnabled) {
-        suspendOtherTabs().catch(error => {
-            console.error("Error suspending other tabs from context menu:", error);
-        });
-    } else if (info.menuItemId === "suspend-selected-tabs" && suspensionEnabled) {
-        browser.tabs.query({ highlighted: true, currentWindow: true }).then(tabs => {
-            tabs.forEach(t => {
-                if (t.id && t.id !== tab.id) { // Suspend other highlighted tabs
-                    suspendTab(t.id).catch(err => console.error("Error suspending selected tab:", t.id, err));
-                }
-            });
-            // Suspend the clicked tab too
-            suspendTab(tab.id).catch(err => console.error("Error suspending clicked tab:", tab.id, err));
+    if (!suspensionEnabled) return;
+    if (info.menuItemId === "suspend-tab" && tab && tab.id) {
+        suspendTab(tab.id).catch((error) => debug("context suspend-tab:", error.message));
+    } else if (info.menuItemId === "suspend-other-tabs") {
+        suspendOtherTabs().catch((error) => console.error("Error suspending other tabs:", error));
+    } else if (info.menuItemId === "suspend-selected-tabs" && tab && tab.id) {
+        browser.tabs.query({ highlighted: true, currentWindow: true }).then((tabs) => {
+            suspendBatch(tabs.filter((t) => t.id), "suspend-selected");
         });
     }
 });
 
-// Function definitions
-function isExceptionDomain(url) {
-    return new Promise((resolve) => {
-        if (!url) {
-            console.log("Empty URL, not an exception");
-            resolve(false);
-            return;
-        }
-        let domain;
-        try {
-            domain = new URL(url).hostname;
-        } catch (error) {
-            console.error("Invalid URL:", url);
-            resolve(false);
-            return;
-        }
-        browser.storage.local.get('exceptions', function (data) {
-            const exceptions = data.exceptions || [];
-            console.log("Checking exceptions for:", domain);
-            console.log("Current exceptions:", exceptions);
-            const isException = exceptions.some(exception => {
-                // Remove protocol and www. from both domain and exception
-                const cleanDomain = domain.replace(/^www\./, '');
-                let cleanException = exception.replace(/^(https?:\/\/)?(www\.)?/, '');
-                cleanException = cleanException.replace(/\/$/, ''); // Remove trailing slash if present
-                return cleanDomain.includes(cleanException) || cleanException.includes(cleanDomain);
-            });
-            console.log("Is exception?", isException);
-            resolve(isException);
-        });
-    });
-}
-
-function updateIcon(active) {
-    const path = active ? "icons/icon_active.png" : "icons/icon_inactive.png";
-    browser.browserAction.setIcon({ path });
-}
-
-const saveOriginalUrl = (tabId, url, title) => {
-    return browser.storage.local.set({
-        [`pending_suspend_${tabId}`]: { url, title, savedAt: Date.now() }
-    });
-};
-
-// Clean up after successful suspension
-const clearPendingUrl = (tabId) => {
-    browser.storage.local.remove(`pending_suspend_${tabId}`);
-};
-
-// Add tab to suspended list in storage
-const addSuspendedTabToStorage = (tabId, url, title, windowId) => {
-    return new Promise((resolve) => {
-        browser.storage.local.get('suspendedTabs', (data) => {
-            const suspendedTabs = data.suspendedTabs || {};
-            suspendedTabs[tabId] = { url, title, windowId, timestamp: Date.now() };
-            browser.storage.local.set({ suspendedTabs }, resolve);
-        });
-    });
-};
-
-// Remove tab from suspended list in storage
-const removeSuspendedTabFromStorage = (tabId) => {
-    return new Promise((resolve) => {
-        browser.storage.local.get('suspendedTabs', (data) => {
-            const suspendedTabs = data.suspendedTabs || {};
-            if (suspendedTabs[tabId]) {
-                delete suspendedTabs[tabId];
-                browser.storage.local.set({ suspendedTabs }, resolve);
-            } else {
-                resolve();
-            }
-        });
-    });
-};
-
-function suspendOtherTabs() {
-    console.log("Suspending all other tabs");
-
-    // Check if suspension is enabled
-    if (!suspensionEnabled) {
-        console.log("Suspension is disabled, not suspending other tabs");
-        return Promise.reject(new Error("Suspension is disabled"));
-    }
-
-    return new Promise((resolve, reject) => {
-        browser.tabs.query({ currentWindow: true }).then(tabs => {
-            console.log("Found tabs in current window:", tabs.length);
-
-            // Get the active tab
-            const activeTab = tabs.find(tab => tab.active);
-            if (!activeTab) {
-                console.log("No active tab found");
-                reject(new Error("No active tab found"));
-                return;
-            }
-
-            console.log("Active tab ID:", activeTab.id);
-
-            // Filter tabs to suspend (exclude active tab)
-            const tabsToSuspend = tabs.filter(tab =>
-                tab.id !== activeTab.id &&
-                !tab.url.startsWith(browser.runtime.getURL("")) &&
-                !tab.url.startsWith("about:") &&
-                !tab.url.startsWith("chrome:") &&
-                !tab.url.startsWith("moz-extension:") &&
-                tab.url !== 'about:blank' &&
-                tab.url !== 'about:newtab' &&
-                !tab.audible // Don't suspend tabs playing audio
-            );
-
-            console.log("Tabs to suspend:", tabsToSuspend.length);
-
-            if (tabsToSuspend.length === 0) {
-                console.log("No eligible tabs to suspend");
-                resolve({ suspended: 0, skipped: tabs.length - 1 });
-                return;
-            }
-
-            let suspendedCount = 0;
-            let skippedCount = 0;
-            let processedCount = 0;
-
-            // Function to check if all tabs have been processed
-            const checkComplete = () => {
-                if (processedCount === tabsToSuspend.length) {
-                    console.log(`Suspension complete. Suspended: ${suspendedCount}, Skipped: ${skippedCount}`);
-                    resolve({ suspended: suspendedCount, skipped: skippedCount });
-                }
-            };
-
-            // Process each tab
-            tabsToSuspend.forEach(tab => {
-                // Check if tab is in exception list
-                isExceptionDomain(tab.url).then(isException => {
-                    processedCount++;
-
-                    if (isException) {
-                        console.log(`Tab ${tab.id} is in exception list, skipping`);
-                        skippedCount++;
-                        checkComplete();
-                        return;
-                    }
-
-                    // Clear any existing timer for this tab
-                    clearTimeout(suspensionTimers[tab.id]);
-                    delete suspensionTimers[tab.id];
-
-                    // Suspend the tab
-                    suspendTab(tab.id).then(() => {
-                        console.log(`Successfully suspended tab ${tab.id}`);
-                        suspendedCount++;
-                        checkComplete();
-                    }).catch(error => {
-                        console.error(`Failed to suspend tab ${tab.id}:`, error);
-                        skippedCount++;
-                        checkComplete();
-                    });
-                }).catch(error => {
-                    console.error(`Error checking exception for tab ${tab.id}:`, error);
-                    processedCount++;
-                    skippedCount++;
-                    checkComplete();
-                });
-            });
-
-        }).catch(error => {
-            console.error("Error querying tabs:", error);
-            reject(error);
-        });
-    });
-}
-
-function suspendTab(tabId) {
-    console.log("Entering suspendTab function for tabId:", tabId);
-
-    // Check if suspension is enabled
-    if (!suspensionEnabled) {
-        console.log("Suspension is disabled, not suspending tab:", tabId);
-        return Promise.reject(new Error("Suspension is disabled"));
-    }
-
-    return new Promise((resolve, reject) => {
-        browser.tabs.get(tabId).then(tab => {
-            console.log("Retrieved tab info:", tab);
-            if (!tab.url) {
-                console.log("Tab has no URL, not suspending:", tabId);
-                reject(new Error("Tab has no URL"));
-                return;
-            }
-
-            console.log("Checking if tab is exception:", tab.url);
-            isExceptionDomain(tab.url).then(isException => {
-                console.log(`Tab ${tabId} exception status:`, isException);
-                if (tab.url.startsWith(browser.runtime.getURL("")) ||
-                    tab.url.startsWith("about:") ||
-                    tab.url.startsWith("chrome:") ||
-                    tab.url.startsWith("moz-extension:") ||
-                    tab.url === 'about:blank' ||
-                    tab.url === 'about:newtab' ||
-                    tab.audible || // Add exception for tabs playing audio
-                    isException) {
-                    console.log("Tab not eligible for suspension:", tabId);
-                    reject(new Error("Tab not eligible for suspension"));
-                    return;
-                }
-
-                console.log("Proceeding with tab suspension:", tabId);
-                const encodedTitle = encodeURIComponent(tab.title || 'Untitled');
-                console.log("Encoded title:", encodedTitle);
-
-                // Function to create suspended URL
-                const createSuspendedUrl = async (screenshotUrl = '') => {
-                    const base = browser.runtime.getURL("src/suspended/suspended.html");
-
-                    if (screenshotUrl) {
-                        await browser.storage.local.set({ [`screenshot_${tabId}`]: screenshotUrl });
-                    }
-
-                    const meta = [
-                        encodeURIComponent(tab.title || ''),
-                        '',
-                        encodeURIComponent(SUSPENDED_PREFIX),
-                        tabId
-                    ].join('|');
-
-                    return `${base}#${meta}@${tab.url}`;
-                };
-
-                // Function to update tab with suspended URL
-                const updateTabToSuspended = async (screenshotUrl) => {
-                    const suspendedUrl = await createSuspendedUrl(screenshotUrl);
-
-                    saveOriginalUrl(tabId, tab.url, tab.title).then(() => {
-                        addSuspendedTabToStorage(tabId, tab.url, tab.title, tab.windowId).then(() => {
-                            browser.tabs.update(tabId, { url: suspendedUrl }).then(() => {
-                                console.log("Tab successfully suspended:", tabId);
-                                updateIcon(true);
-                                clearPendingUrl(tabId);
-                                resolve();
-                            }).catch(error => {
-                                console.error("Error updating tab:", tabId, error);
-                                removeSuspendedTabFromStorage(tabId);
-                                clearPendingUrl(tabId);
-                                reject(error);
-                            });
-                        });
-                    });
-                };
-
-                // Capture screenshot if enabled, otherwise suspend without screenshot
-                if (screenshotsEnabled) {
-                    console.log("Attempting to capture screenshot for tab:", tabId);
-                    browser.tabs.captureTab(tabId, { format: 'jpeg', quality: 50 }).then(screenshotUrl => {
-                        console.log("Screenshot captured for tab:", tabId);
-                        updateTabToSuspended(screenshotUrl);
-                    }).catch(error => {
-                        console.error("Error capturing screenshot:", error);
-                        // If screenshot capture fails, suspend the tab without a screenshot
-                        updateTabToSuspended();
-                    });
-                } else {
-                    console.log("Screenshots disabled, suspending without screenshot:", tabId);
-                    updateTabToSuspended();
-                }
-            }).catch(error => {
-                console.error("Error checking exception domain:", error);
-                reject(error);
-            });
-        }).catch(error => {
-            console.error("Error getting tab:", tabId, error);
-            reject(error);
-        });
-    });
-}
-
-function resetTimer(tabId) {
-    console.log("Resetting timer for tab:", tabId);
-    clearTimeout(suspensionTimers[tabId]);
-
-    if (!suspensionEnabled || !autoSuspensionEnabled) {
-        console.log("Suspension or auto-suspension is disabled, not setting timer for tab:", tabId);
-        return;
-    }
-
-    browser.tabs.get(tabId).then(tab => {
-        if (tab.active) {
-            console.log("Tab is active, not setting timer:", tabId);
-            return;
-        }
-
-        if (!tab.url) {
-            console.log("Tab has no URL, not setting timer:", tabId);
-            return;
-        }
-
-        const isSuspendedTab = tab.url.startsWith(browser.runtime.getURL("src/suspended/suspended.html"));
-
-        // For suspended tabs, we need to extract original URL
-        const effectiveUrl = isSuspendedTab ? tab.url.slice(tab.url.indexOf('@') + 1) : tab.url;
-
-        isExceptionDomain(effectiveUrl).then(isException => {
-            if (!tab.url.startsWith(browser.runtime.getURL("")) &&
-                !tab.url.startsWith("about:") &&
-                !tab.url.startsWith("chrome:") &&
-                !tab.url.startsWith("moz-extension:") &&
-                tab.url !== 'about:blank' &&
-                tab.url !== 'about:newtab' &&
-                !tab.audible &&
-                !isException) {
-
-                suspensionTimers[tabId] = setTimeout(() => {
-                    browser.tabs.get(tabId).then(latestTab => {
-                        // FINAL GUARD — check if still active
-                        if (latestTab.active) {
-                            console.log("Tab is still active at timeout, skipping suspension:", tabId);
-                            return;
-                        }
-                        suspendTab(tabId);
-                    });
-                }, SUSPEND_DELAY * 1000);
-
-                console.log(`Timer set for tab ${tabId}`);
-            } else {
-                console.log("Tab not eligible for suspension timer:", tabId);
-            }
-        });
-    }).catch(error => {
-        console.error("Error in resetTimer:", error);
-    });
-}
-
-
-function checkExceptionAndSetTimer(tabId, url) {
-    // Don't set timers if suspension is disabled
-    if (!suspensionEnabled) {
-        console.log("Suspension is disabled, not setting timer for tab:", tabId);
-        return;
-    }
-
-    isExceptionDomain(url).then(isException => {
-        console.log(`Tab ${tabId} exception status:`, isException);
-        browser.tabs.get(tabId).then(tab => {
-            if (!url.startsWith(browser.runtime.getURL("")) &&
-                !url.startsWith("about:") &&
-                !url.startsWith("chrome:") &&
-                !url.startsWith("moz-extension:") &&
-                url !== 'about:blank' &&
-                url !== 'about:newtab' &&
-                !tab.audible && // Add check for audio playing
-                !isException) {
-                suspensionTimers[tabId] = setTimeout(() => suspendTab(tabId), SUSPEND_DELAY * 1000);
-                console.log(`Timer set for tab ${tabId}`);
-            } else {
-                console.log("Tab not eligible for suspension timer:", tabId);
-            }
-        }).catch(error => {
-            console.error("Error getting tab in checkExceptionAndSetTimer:", tabId, error);
-        });
-    });
-}
-
-// Load the suspension timer from storage
-function loadSuspensionTimer() {
-    browser.storage.local.get('suspensionTimer', function (data) {
-        const totalMinutes = data.suspensionTimer || 1;
-        SUSPEND_DELAY = totalMinutes * 60; // Convert minutes to seconds
-        console.log("Loaded suspension timer:", totalMinutes, "minutes (", SUSPEND_DELAY, "seconds)");
-    });
-}
-
-// Clear all suspension timers
-function clearAllTimers() {
-    console.log("Clearing all suspension timers");
-    Object.keys(suspensionTimers).forEach(tabId => {
-        clearTimeout(suspensionTimers[tabId]);
-        delete suspensionTimers[tabId];
-    });
-}
-
-// Call this function when the extension starts
-loadSuspensionTimer();
-
-// Event listeners
-browser.tabs.onActivated.addListener(activeInfo => {
-    console.log("Tab activated:", activeInfo.tabId);
-
-    // Find previously active tab in this window and set its suspension timer
+browser.tabs.onActivated.addListener((activeInfo) => {
     const prevTabId = activeTabs[activeInfo.windowId];
-    if (prevTabId && prevTabId !== activeInfo.tabId && suspensionEnabled && autoSuspensionEnabled) {
-        console.log("Previously active tab was:", prevTabId, "- setting suspension timer");
-        resetTimer(prevTabId);
+    if (prevTabId && prevTabId !== activeInfo.tabId) {
+        // Previously visible tab starts aging now (if eligible).
+        browser.tabs.get(prevTabId).then((prev) => {
+            if (suspensionEnabled && autoSuspensionEnabled && isEligibleForAutoSuspend({ ...prev, active: false })) {
+                touch(prevTabId);
+            }
+        }).catch(() => untouch(prevTabId)); // tab already closed
     }
-
-    // Update active tab for this window
     activeTabs[activeInfo.windowId] = activeInfo.tabId;
-
-    // Clear timer for the activated tab
-    clearTimeout(suspensionTimers[activeInfo.tabId]);
-    delete suspensionTimers[activeInfo.tabId];
+    untouch(activeInfo.tabId);
 });
 
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    // If the URL changed and it's no longer the suspended page, remove it from storage
-    if (changeInfo.url) {
-        if (!changeInfo.url.startsWith(browser.runtime.getURL("src/suspended/suspended.html"))) {
-            removeSuspendedTabFromStorage(tabId);
-        }
+    if (changeInfo.url && !isSuspendedTabUrl(changeInfo.url)) {
+        removeSuspendedTabFromStorage(tabId);
     }
-
-    if (suspensionEnabled) {
-        // If status is complete or audible changed to false (stopped playing audio)
-        if ((changeInfo.status === 'complete' || changeInfo.audible === false) && autoSuspensionEnabled) {
-            console.log("Tab updated (status complete or stopped playing audio):", tabId);
-            resetTimer(tabId);
-        } else if (changeInfo.audible === true) {
-            // Clear timer if tab started playing audio
-            console.log("Tab started playing audio, clearing timer:", tabId);
-            clearTimeout(suspensionTimers[tabId]);
-            delete suspensionTimers[tabId];
+    if (!suspensionEnabled || !autoSuspensionEnabled) return;
+    if (changeInfo.audible === true) {
+        untouch(tabId);
+    } else if (changeInfo.status === "complete" || changeInfo.audible === false) {
+        if (!tab.active && isEligibleForAutoSuspend({ ...tab, audible: false })) {
+            if (lastSeen[tabId] === undefined) touch(tabId);
+        } else {
+            untouch(tabId);
         }
     }
 });
 
 browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
-    console.log("Tab removed:", tabId);
-    clearTimeout(suspensionTimers[tabId]);
-    delete suspensionTimers[tabId];
+    untouch(tabId);
     removeSuspendedTabFromStorage(tabId);
-
-    // Remove from activeTabs tracking if it was the active tab
     if (activeTabs[removeInfo.windowId] === tabId) {
         delete activeTabs[removeInfo.windowId];
     }
 });
 
-// Listener for port connections (e.g. from suspended tabs)
 browser.runtime.onConnect.addListener((port) => {
     if (port.name === "suspended-tab") {
-        console.log("Suspended tab connected");
+        debug("Suspended tab connected");
     }
 });
 
-// Message listener
-browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    console.log("Received message:", message);
+// ---- messages ----
 
+browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === "suspendTab") {
         if (!suspensionEnabled) {
-            console.log("Suspension is disabled, cannot suspend tab");
             sendResponse({ success: false, error: "Suspension is disabled" });
             return;
         }
-
-        console.log("Suspending current tab");
-        browser.tabs.query({ active: true, currentWindow: true }).then(tabs => {
+        browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
             if (tabs.length > 0) {
-                console.log("Found active tab:", tabs[0].id);
                 suspendTab(tabs[0].id)
-                    .then(() => {
-                        console.log("Tab suspension completed successfully");
-                        sendResponse({ success: true });
-                    })
-                    .catch(error => {
-                        console.error("Error during tab suspension:", error);
-                        sendResponse({ success: false, error: error.message });
-                    });
+                    .then(() => sendResponse({ success: true }))
+                    .catch((error) => sendResponse({ success: false, error: error.message }));
             } else {
-                console.log("No active tab found");
                 sendResponse({ success: false, error: "No active tab found" });
             }
-        }).catch(error => {
-            console.error("Error querying tabs:", error);
-            sendResponse({ success: false, error: error.message });
-        });
-        return true; // Indicates that we will send a response asynchronously
+        }).catch((error) => sendResponse({ success: false, error: error.message }));
+        return true;
 
     } else if (message.action === "suspendOtherTabs") {
         if (!suspensionEnabled) {
-            console.log("Suspension is disabled, cannot suspend other tabs");
             sendResponse({ success: false, error: "Suspension is disabled" });
             return;
         }
-
-        console.log("Suspending all other tabs");
         suspendOtherTabs()
-            .then(result => {
-                console.log("Other tabs suspension completed successfully");
-                sendResponse({
-                    success: true,
-                    suspended: result.suspended,
-                    skipped: result.skipped
-                });
-            })
-            .catch(error => {
-                console.error("Error during other tabs suspension:", error);
-                sendResponse({ success: false, error: error.message });
-            });
-        return true; // Indicates that we will send a response asynchronously
+            .then((result) => sendResponse({ success: true, suspended: result.suspended, skipped: result.skipped }))
+            .catch((error) => sendResponse({ success: false, error: error.message }));
+        return true;
+
+    } else if (message.action === "unsuspendOtherTabs") {
+        // No suspensionEnabled gate: restoring tabs must always work.
+        unsuspendOtherTabs()
+            .then((result) => sendResponse({ success: true, restored: result.restored, skipped: result.skipped }))
+            .catch((error) => sendResponse({ success: false, error: error.message }));
+        return true;
 
     } else if (message.action === "updateTimer") {
         const totalMinutes = message.value;
-        SUSPEND_DELAY = totalMinutes * 60; // Convert minutes to seconds
-        console.log("Suspension timer updated:", totalMinutes, "minutes (", SUSPEND_DELAY, "seconds)");
-
-        // Save the new timer value to storage
-        browser.storage.local.set({ suspensionTimer: totalMinutes }, function () {
-            console.log("Timer saved to storage:", totalMinutes, "minutes");
-        });
-
-        // Reset all existing timers if suspension is enabled and auto suspension is enabled
-        if (suspensionEnabled && autoSuspensionEnabled) {
-            Object.keys(suspensionTimers).forEach(tabId => {
-                resetTimer(parseInt(tabId, 10));
-            });
-        }
+        SUSPEND_DELAY = totalMinutes * 60;
+        // Persist; onChanged listener picks it up in all contexts.
+        // No timestamp reset: existing lastSeen values are reused, the new
+        // delay applies lazily on the next sweep.
+        browser.storage.local.set({ suspensionTimer: totalMinutes });
     } else if (message.action === "toggleSuspension") {
         suspensionEnabled = message.enabled;
-        console.log("Suspension toggled:", suspensionEnabled);
-
         if (!suspensionEnabled) {
-            // Clear all existing timers when disabling
-            clearAllTimers();
-        } else {
-            // Restart timers for all tabs when enabling if auto suspension is also enabled
-            if (autoSuspensionEnabled) {
-                browser.tabs.query({}).then(tabs => {
-                    tabs.forEach(tab => {
-                        if (!tab.active && !tab.audible) {
-                            resetTimer(tab.id);
-                        }
-                    });
-                });
-            }
+            clearAllTimestamps();
+        } else if (autoSuspensionEnabled) {
+            seedAllTabs();
         }
-
-        // Update icon based on toggle state
         updateIcon(suspensionEnabled);
 
     } else if (message.action === "toggleAutoSuspension") {
         autoSuspensionEnabled = message.enabled;
-        console.log("Auto suspension toggled:", autoSuspensionEnabled);
-
         if (!autoSuspensionEnabled) {
-            // Clear all existing timers when auto-suspension is disabled
-            clearAllTimers();
+            clearAllTimestamps();
         } else {
-            // Restart timers for all tabs when auto-suspension is enabled
-            browser.tabs.query({}).then(tabs => {
-                tabs.forEach(tab => {
-                    if (!tab.active && !tab.audible) {
-                        resetTimer(tab.id);
-                    }
-                });
-            });
+            seedAllTabs();
         }
 
     } else if (message.action === "toggleScreenshots") {
         screenshotsEnabled = message.enabled;
-        console.log("Screenshots toggled:", screenshotsEnabled);
-
-        // Save the new screenshot setting to storage
-        browser.storage.local.set({ screenshotsEnabled: screenshotsEnabled }, function () {
-            console.log("Screenshots setting saved to storage:", screenshotsEnabled);
-        });
+        browser.storage.local.set({ screenshotsEnabled });
 
     } else if (message.action === "updateIcon") {
         updateIcon(message.active);
     }
 });
 
-// Interval for checking tabs
-setInterval(() => {
-    // Only check tabs if suspension and auto suspension are enabled
-    if (!suspensionEnabled || !autoSuspensionEnabled) {
-        return;
-    }
-
-    browser.tabs.query({}).then(tabs => {
-        console.log("Checking tabs for suspension, total tabs:", tabs.length);
-        tabs.forEach(tab => {
-            console.log(`Tab ${tab.id}: active=${tab.active}, audible=${tab.audible}, url=${tab.url}`);
-
-            // If the tab is active or playing audio, clear its timer and skip
-            if (tab.active || tab.audible) {
-                clearTimeout(suspensionTimers[tab.id]);
-                delete suspensionTimers[tab.id];
-                console.log("Tab is active or playing audio, skipping:", tab.id);
-                return;
-            }
-
-            isExceptionDomain(tab.url).then(isException => {
-                if (!tab.active &&
-                    !tab.audible && // Add check for audio playing
-                    !tab.url.startsWith(browser.runtime.getURL("")) &&
-                    !tab.url.startsWith("about:") &&
-                    !tab.url.startsWith("chrome:") &&
-                    !tab.url.startsWith("moz-extension:") &&
-                    tab.url !== 'about:blank' &&
-                    tab.url !== 'about:newtab' &&
-                    !isException) {
-                    if (!suspensionTimers[tab.id]) {
-                        console.log("Setting new timer for tab:", tab.id);
-                        resetTimer(tab.id);
-                    } else {
-                        console.log("Timer already exists for tab:", tab.id);
-                    }
-                } else {
-                    console.log("Tab not eligible for suspension:", tab.id);
-                }
-            });
-        });
-    });
-}, 60000); // Check every minute
+setInterval(sweepOnce, SWEEP_INTERVAL_MS);
+// NOTE: MV2 persistent background can hold this interval. If/when migrating
+// to MV3 (service worker), replace with chrome.alarms — workers are killed
+// after ~30s and all setTimeout/setInterval state is lost.
 
 // Restore all suspended tabs when the extension is unloaded/reloaded
 if (browser.runtime.onSuspend) {
     browser.runtime.onSuspend.addListener(() => {
-        console.log("Extension suspending/reloading. Unsuspending all tabs to prevent them from being closed.");
-        browser.tabs.query({}).then(tabs => {
-            tabs.forEach(tab => {
-                if (tab.url && tab.url.startsWith(browser.runtime.getURL("src/suspended/suspended.html"))) {
-                    const originalUrl = tab.url.slice(tab.url.indexOf('@') + 1);
-                    if (originalUrl) {
-                        browser.tabs.update(tab.id, { url: originalUrl });
-                    }
+        browser.tabs.query({}).then((tabs) => {
+            tabs.forEach((tab) => {
+                if (isSuspendedTabUrl(tab.url)) {
+                    const originalUrl = extractOriginalUrl(tab.url);
+                    if (originalUrl) browser.tabs.update(tab.id, { url: originalUrl });
                 }
             });
         });
     });
 }
 
-// Function to scan and restore closed suspended tabs upon reload/startup
 function restoreClosedSuspendedTabs() {
-    browser.storage.local.get('suspendedTabs', (data) => {
-        const suspendedTabs = data.suspendedTabs || {};
+    const read = suspendedTabsCache !== null
+        ? Promise.resolve(suspendedTabsCache)
+        : browser.storage.local.get("suspendedTabs").then((d) => (suspendedTabsCache = d.suspendedTabs || {}));
+    read.then((suspendedTabs) => {
         if (Object.keys(suspendedTabs).length === 0) return;
-
-        browser.tabs.query({}).then(tabs => {
-            const openTabIds = new Set(tabs.map(tab => tab.id));
+        browser.tabs.query({}).then((tabs) => {
+            const openTabIds = new Set(tabs.map((tab) => tab.id));
             const closedTabs = [];
-
-            Object.keys(suspendedTabs).forEach(tabIdStr => {
+            Object.keys(suspendedTabs).forEach((tabIdStr) => {
                 const tabId = parseInt(tabIdStr, 10);
-                if (!openTabIds.has(tabId)) {
-                    closedTabs.push({ tabId, ...suspendedTabs[tabId] });
-                }
+                if (!openTabIds.has(tabId)) closedTabs.push({ tabId, ...suspendedTabs[tabId] });
             });
-
             if (closedTabs.length > 0) {
-                console.log(`Found ${closedTabs.length} suspended tabs that were closed. Restoring them...`);
-                closedTabs.forEach(closedTab => {
-                    browser.tabs.create({
-                        url: closedTab.url,
-                        windowId: closedTab.windowId,
-                        active: false
-                    }).then(() => {
-                        removeSuspendedTabFromStorage(closedTab.tabId);
-                    });
-                });
+                console.log(`Restoring ${closedTabs.length} suspended tabs that were closed...`);
+                // Sequential restore: tabs.create in a tight loop with 1000+
+                // tabs spikes CPU/memory.
+                (async () => {
+                    for (const closedTab of closedTabs) {
+                        try {
+                            await browser.tabs.create({ url: closedTab.url, windowId: closedTab.windowId, active: false });
+                            await removeSuspendedTabFromStorage(closedTab.tabId);
+                        } catch (e) {
+                            debug("restore failed:", closedTab.url, e.message);
+                        }
+                    }
+                })();
             }
         });
     });
 }
 
-// Check and restore tabs shortly after start
+// Startup
+loadInitialState();
 setTimeout(restoreClosedSuspendedTabs, 1000);
-
-// Initialize icon based on suspension state
 updateIcon(suspensionEnabled);
