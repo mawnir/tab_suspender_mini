@@ -41,12 +41,42 @@ function isExceptionCached(url) {
     return false;
 }
 
+function extractOriginalUrl(suspendedUrl) {
+    if (!suspendedUrl) return "";
+    // New format (2.x): ...suspended.html#<meta>@<originalUrl>
+    const hashAt = suspendedUrl.indexOf("#");
+    if (hashAt >= 0) {
+        const hash = suspendedUrl.slice(hashAt + 1);
+        const at = hash.indexOf("@");
+        if (at >= 0) {
+            const url = hash.slice(at + 1);
+            if (url) return url;
+        }
+    }
+    // Legacy format (<=1.51): ...suspended.html?url=<enc>&title=...
+    // Required so tabs suspended before the hash migration can still be
+    // restored (Unsuspend Others, click-to-restore, startup recovery).
+    // NOTE: regex instead of URLSearchParams — legacy URLs embed a full
+    // base64 JPEG in &screenshot= (megabytes). Parsing the whole query on
+    // every sweep would be slow with many tabs.
+    const legacyMatch = suspendedUrl.match(/[?&]url=([^&]*)/);
+    if (legacyMatch && legacyMatch[1]) {
+        try {
+            return decodeURIComponent(legacyMatch[1]);
+        } catch (e) {
+            return legacyMatch[1];
+        }
+    }
+    // Fallback for URLs containing a bare "@" (very old edge case).
+    const at = suspendedUrl.indexOf("@");
+    return at >= 0 ? suspendedUrl.slice(at + 1) : "";
+}
+
 function getEffectiveUrl(tab) {
     if (!tab || !tab.url) return "";
     const prefix = browser.runtime.getURL("src/suspended/suspended.html");
     if (tab.url.startsWith(prefix)) {
-        const at = tab.url.indexOf("@");
-        return at >= 0 ? tab.url.slice(at + 1) : "";
+        return extractOriginalUrl(tab.url);
     }
     return tab.url;
 }
@@ -285,11 +315,6 @@ function suspendOtherTabs() {
 
 function isSuspendedTabUrl(url) {
     return !!url && url.startsWith(browser.runtime.getURL("src/suspended/suspended.html"));
-}
-
-function extractOriginalUrl(suspendedUrl) {
-    const at = suspendedUrl.indexOf("@");
-    return at >= 0 ? suspendedUrl.slice(at + 1) : "";
 }
 
 async function unsuspendTab(tabId) {
