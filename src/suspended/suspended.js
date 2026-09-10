@@ -1,3 +1,22 @@
+// Must stay in sync with background.js copy: URL-hash keys survive window
+// close / session restore, tabIds do not.
+function hashString(str, seed) {
+    let h1 = 0xdeadbeef ^ (seed || 0);
+    let h2 = 0x41c6ce57 ^ (seed || 0);
+    for (let i = 0, ch; i < str.length; i++) {
+        ch = str.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
+}
+
+function screenshotKeyForUrl(url) {
+    return `screenshot_${hashString(url || "")}`;
+}
+
 function parseSuspendedLocation() {
     // New format (2.x): suspended.html#<encTitle>|<encFavicon>|<encPrefix>|<tabId>@<originalUrl>
     const hash = window.location.hash.slice(1);
@@ -74,24 +93,54 @@ function initSuspendedPage() {
             document.body.style.backgroundImage = `url(${screenshot})`;
         }
 
-        // Fetch screenshot from storage instead of URL
-        if (tabId) {
-            browser.storage.local.get([`screenshot_${tabId}`, `favicon_${tabId}`]).then(data => {
-                const screenshot = data[`screenshot_${tabId}`];
-                const favicon = data[`favicon_${tabId}`];
+        // Fetch screenshot from storage instead of URL.
+        // Stable URL-hash key first (survives restarts); legacy tabId key as
+        // fallback for tabs suspended before the migration. Never delete on
+        // view — screenshots persist until real restore, so reloads and
+        // session restores keep showing the preview.
+        if (url) {
+            const stableKey = screenshotKeyForUrl(url);
+            const keys = [stableKey];
+            if (tabId) keys.push(`screenshot_${tabId}`, `favicon_${tabId}`);
+            browser.storage.local.get(keys).then(data => {
+                let storedScreenshot = data[stableKey];
+                const storedFavicon = (tabId && data[`favicon_${tabId}`]) || undefined;
 
-                if (screenshot) {
-                    document.body.style.backgroundImage = `url(${screenshot})`;
-                }
-                if (favicon) {
-                    document.getElementById('favicon').href = favicon;
+                // One-time migration: old tabId-keyed screenshot -> stable key
+                // so the next restart still finds it.
+                if (!storedScreenshot && tabId && data[`screenshot_${tabId}`]) {
+                    storedScreenshot = data[`screenshot_${tabId}`];
+                    browser.storage.local.set({ [stableKey]: storedScreenshot }).catch(() => {});
                 }
 
-                browser.storage.local.remove([`screenshot_${tabId}`, `favicon_${tabId}`]);
+                if (storedScreenshot) {
+                    document.body.style.backgroundImage = `url(${storedScreenshot})`;
+                }
+                if (storedFavicon) {
+                    document.getElementById('favicon').href = storedFavicon;
+                }
             });
         }
 
-        document.body.addEventListener('click', () => {
+        const notifyRestore = () => {
+            // Tell background to drop the screenshot AFTER real restore.
+            // Fire-and-forget: navigation must not wait for a response.
+            if (!url) return;
+            try {
+                browser.runtime.sendMessage({ action: "screenshotConsumed", url });
+            } catch (e) { /* background may be reloading */ }
+        };
+
+        document.getElementById('url').addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            notifyRestore();
+            window.location.href = url;
+        });
+
+        document.body.addEventListener('click', (e) => {
+            if (e.target && e.target.closest && e.target.closest('#url')) return;
+            notifyRestore();
             window.location.href = url;
         });
 

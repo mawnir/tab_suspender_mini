@@ -1,5 +1,25 @@
 # 💤 Tab Suspender Mini
 
+> [!WARNING]
+> **Before updating the extension, unsuspend all tabs first** (Popup → **Unsuspend Others**, or click each suspended tab to restore it).
+>
+> Suspended tab URLs point to the old extension ID, so after an update they may fail to restore on click.
+
+> [!TIP]
+> **If you already updated and suspended tabs won't restore, update the extension and try this fix — bulk restore (fastest):**
+>
+> Firefox: `about:debugging#/runtime/this-firefox` → **Inspect** Tab Suspender Mini → Console, then run the script below.
+
+```js
+const tabs = await browser.tabs.query({});
+for (const t of tabs) {
+  if (t.url && t.url.includes("suspended.html?url=")) {
+    const orig = decodeURIComponent(new URL(t.url).searchParams.get("url"));
+    if (orig) await browser.tabs.update(t.id, { url: orig });
+  }
+}
+```
+
 <img src="pics/icon.png" alt="Tab Suspender Mini icon" width="64" />
 
 Automatically suspend inactive tabs to reduce memory and CPU usage. Lightweight, fast even with hundreds of tabs, with manual controls, screenshots, exceptions, and crash recovery.

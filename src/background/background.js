@@ -23,6 +23,38 @@ function normalizeException(s) {
     return (s || "").replace(/^(https?:\/\/)?(www\.)?/, "").replace(/\/$/, "").toLowerCase();
 }
 
+// ---- screenshots keyed by URL hash, not tabId ----
+// tabIds are session-scoped: after a window close / session restore every tab
+// gets a NEW id, so `screenshot_<oldTabId>` never matches again. URL hashes
+// are stable across restarts. Must stay in sync with suspended.js copy.
+function hashString(str, seed) {
+    let h1 = 0xdeadbeef ^ (seed || 0);
+    let h2 = 0x41c6ce57 ^ (seed || 0);
+    for (let i = 0, ch; i < str.length; i++) {
+        ch = str.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
+}
+
+function screenshotKeyForUrl(url) {
+    return `screenshot_${hashString(url || "")}`;
+}
+
+function buildSuspendedUrl(originalUrl, title) {
+    const base = browser.runtime.getURL("src/suspended/suspended.html");
+    const meta = [
+        encodeURIComponent(title || ""),
+        "",
+        encodeURIComponent(SUSPENDED_PREFIX),
+        ""
+    ].join("|");
+    return `${base}#${meta}@${originalUrl}`;
+}
+
 // Synchronous, in-memory check. Old code did storage.local.get per tab per
 // sweep — that was the real scaling bottleneck, not setTimeout.
 function isExceptionCached(url) {
@@ -226,7 +258,15 @@ async function suspendTab(tabId) {
     const createSuspendedUrl = async (screenshotUrl = "") => {
         const base = browser.runtime.getURL("src/suspended/suspended.html");
         if (screenshotUrl) {
-            await browser.storage.local.set({ [`screenshot_${tabId}`]: screenshotUrl });
+            try {
+                // Stable key: survives window close / session restore where
+                // tabIds change. Legacy `screenshot_<tabId>` fallback is read
+                // by suspended.js but no longer written.
+                await browser.storage.local.set({ [screenshotKeyForUrl(tab.url)]: screenshotUrl });
+            } catch (e) {
+                // Quota exceeded (5MB local): suspend anyway, just no preview.
+                debug("screenshot save failed (quota?):", e.message);
+            }
         }
         const meta = [
             encodeURIComponent(tab.title || ""),
@@ -324,8 +364,14 @@ async function unsuspendTab(tabId) {
     if (!originalUrl) throw new Error("Suspended tab has no original URL");
     await browser.tabs.update(tabId, { url: originalUrl });
     await removeSuspendedTabFromStorage(tabId);
-    // Clean up leftovers the suspended page would otherwise remove on load.
-    browser.storage.local.remove([`screenshot_${tabId}`, `favicon_${tabId}`, `pending_suspend_${tabId}`]);
+    // Screenshots now persist across views/restores — delete only on real
+    // restore. Remove both the stable URL-hash key and legacy tabId keys.
+    browser.storage.local.remove([
+        screenshotKeyForUrl(originalUrl),
+        `screenshot_${tabId}`,
+        `favicon_${tabId}`,
+        `pending_suspend_${tabId}`
+    ]);
     // Restored tab starts aging for auto-suspension from now.
     if (suspensionEnabled && autoSuspensionEnabled) touch(tabId);
     else untouch(tabId);
@@ -539,6 +585,18 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
             .catch((error) => sendResponse({ success: false, error: error.message }));
         return true;
 
+    } else if (message.action === "screenshotConsumed") {
+        // Click-to-restore from the suspended page: that navigation bypasses
+        // unsuspendTab(), so delete the screenshot here. Fire-and-forget.
+        if (message.url) {
+            browser.storage.local.remove(screenshotKeyForUrl(message.url));
+            if (sender && sender.tab && sender.tab.id !== undefined) {
+                browser.storage.local.remove([`screenshot_${sender.tab.id}`, `favicon_${sender.tab.id}`]);
+                removeSuspendedTabFromStorage(sender.tab.id);
+            }
+        }
+        return false;
+
     } else if (message.action === "updateTimer") {
         const totalMinutes = message.value;
         SUSPEND_DELAY = totalMinutes * 60;
@@ -596,13 +654,29 @@ function restoreClosedSuspendedTabs() {
         ? Promise.resolve(suspendedTabsCache)
         : browser.storage.local.get("suspendedTabs").then((d) => (suspendedTabsCache = d.suspendedTabs || {}));
     read.then((suspendedTabs) => {
-        if (Object.keys(suspendedTabs).length === 0) return;
+        if (Object.keys(suspendedTabs).length === 0) {
+            cleanupOrphanScreenshots(new Set());
+            return;
+        }
         browser.tabs.query({}).then((tabs) => {
             const openTabIds = new Set(tabs.map((tab) => tab.id));
+            // URLs already open (live or suspended) must not be duplicated.
+            const openUrls = new Set();
+            tabs.forEach((tab) => {
+                openUrls.add(tab.url);
+                if (isSuspendedTabUrl(tab.url)) openUrls.add(extractOriginalUrl(tab.url));
+            });
             const closedTabs = [];
             Object.keys(suspendedTabs).forEach((tabIdStr) => {
                 const tabId = parseInt(tabIdStr, 10);
-                if (!openTabIds.has(tabId)) closedTabs.push({ tabId, ...suspendedTabs[tabId] });
+                const entry = suspendedTabs[tabIdStr];
+                if (!entry || !entry.url) return;
+                if (!openTabIds.has(tabId) && !openUrls.has(entry.url)) {
+                    closedTabs.push({ tabId, ...entry });
+                } else if (!openTabIds.has(tabId)) {
+                    // Stale id for an already-open URL: drop without restore.
+                    removeSuspendedTabFromStorage(tabId);
+                }
             });
             if (closedTabs.length > 0) {
                 console.log(`Restoring ${closedTabs.length} suspended tabs that were closed...`);
@@ -611,16 +685,73 @@ function restoreClosedSuspendedTabs() {
                 (async () => {
                     for (const closedTab of closedTabs) {
                         try {
-                            await browser.tabs.create({ url: closedTab.url, windowId: closedTab.windowId, active: false });
+                            // Restore as a SUSPENDED page (not the live URL) so
+                            // the saved screenshot (keyed by URL hash) still
+                            // displays. Screenshot stays until real restore.
+                            const suspendedUrl = buildSuspendedUrl(closedTab.url, closedTab.title);
+                            let newTab;
+                            try {
+                                newTab = await browser.tabs.create({ url: suspendedUrl, windowId: closedTab.windowId, active: false });
+                            } catch (e) {
+                                // windowId gone (window was closed): open in a
+                                // current window instead.
+                                newTab = await browser.tabs.create({ url: suspendedUrl, active: false });
+                            }
+                            if (newTab && newTab.id !== undefined) {
+                                await addSuspendedTabToStorage(newTab.id, closedTab.url, closedTab.title, newTab.windowId);
+                            }
                             await removeSuspendedTabFromStorage(closedTab.tabId);
                         } catch (e) {
                             debug("restore failed:", closedTab.url, e.message);
                         }
                     }
+                    cleanupOrphanScreenshots();
                 })();
+            } else {
+                cleanupOrphanScreenshots();
             }
         });
     });
+}
+
+// Screenshots persist until real restore, so crash leftovers could grow
+// unbounded (5MB local quota). Keep only screenshots for currently-suspended
+// or registered URLs; drop the rest.
+function cleanupOrphanScreenshots(knownHashes) {
+    const collect = () => {
+        if (knownHashes) return Promise.resolve(knownHashes);
+        return browser.tabs.query({}).then((tabs) => {
+            const hashes = new Set();
+            tabs.forEach((tab) => {
+                if (isSuspendedTabUrl(tab.url)) {
+                    const original = extractOriginalUrl(tab.url);
+                    if (original) hashes.add(hashString(original));
+                }
+            });
+            const cache = suspendedTabsCache || {};
+            Object.values(cache).forEach((entry) => {
+                if (entry && entry.url) hashes.add(hashString(entry.url));
+            });
+            return hashes;
+        });
+    };
+    collect().then((hashes) => {
+        browser.storage.local.get(null).then((all) => {
+            const orphans = Object.keys(all).filter((k) => {
+                if (!k.startsWith("screenshot_")) return false;
+                // Legacy numeric keys (screenshot_<tabId>): only kept if some
+                // old-format suspended tab still references them; they are
+                // migrated on view, otherwise purged here.
+                if (/^screenshot_\d+$/.test(k)) return true;
+                const hash = k.slice("screenshot_".length);
+                return !hashes.has(hash);
+            });
+            if (orphans.length > 0) {
+                debug(`cleaning ${orphans.length} orphan screenshots`);
+                browser.storage.local.remove(orphans);
+            }
+        }).catch((e) => debug("orphan cleanup failed:", e.message));
+    }).catch((e) => debug("orphan cleanup failed:", e.message));
 }
 
 // Startup
