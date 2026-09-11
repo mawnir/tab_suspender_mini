@@ -595,15 +595,42 @@ tabsQuery({ active: true }).then((tabs) => {
     });
 }).catch((e) => debug("initial activeTabs query failed:", e.message));
 
-extApi.commands.onCommand.addListener((command) => {
-    if (command === "suspend-tab" && suspensionEnabled) {
-        tabsQuery({ active: true, currentWindow: true }).then((tabs) => {
-            if (tabs.length > 0) suspendTab(tabs[0].id).catch((e) => debug("suspend-tab:", e.message));
-        }).catch((e) => debug("suspend-tab query failed:", e.message));
-    } else if (command === "suspend-other-tabs" && suspensionEnabled) {
-        suspendOtherTabs().catch((error) => console.error("Error suspending other tabs:", error));
-    }
-});
+if (extApi.commands && extApi.commands.onCommand) {
+    extApi.commands.onCommand.addListener((command) => {
+        // Always log (not debug-gated): if the shortcut fires, this line
+        // appears in the background console (about:debugging -> Inspect).
+        // If NOTHING appears when you press Cmd/Ctrl+Shift+X/Y, the browser
+        // never delivered the command — remap it under:
+        // Firefox: about:addons -> gear -> Manage Extension Shortcuts
+        // Chrome: chrome://extensions/shortcuts
+        console.log(`[commands] received: ${command}`);
+        if (command === "suspend-tab") {
+            if (!suspensionEnabled) {
+                console.warn("[commands] suspend-tab ignored: extension disabled");
+                return;
+            }
+            tabsQuery({ active: true, currentWindow: true }).then((tabs) => {
+                if (tabs.length > 0) {
+                    suspendTab(tabs[0].id)
+                        .then(() => console.log(`[commands] suspended tab ${tabs[0].id}`))
+                        .catch((e) => console.warn("[commands] suspend-tab skipped:", e.message));
+                } else {
+                    console.warn("[commands] suspend-tab: no active tab found");
+                }
+            }).catch((e) => console.warn("[commands] suspend-tab query failed:", e.message));
+        } else if (command === "suspend-other-tabs") {
+            if (!suspensionEnabled) {
+                console.warn("[commands] suspend-other-tabs ignored: extension disabled");
+                return;
+            }
+            suspendOtherTabs()
+                .then((r) => console.log(`[commands] suspend-other done: suspended=${r.suspended} skipped=${r.skipped}`))
+                .catch((error) => console.error("[commands] Error suspending other tabs:", error));
+        }
+    });
+} else {
+    console.warn("[commands] commands API unavailable — shortcuts will not work in this browser");
+}
 
 // removeAll first: re-creating the same IDs on reload otherwise throws.
 if (extApi.contextMenus && extApi.contextMenus.removeAll) {
