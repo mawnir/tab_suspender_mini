@@ -44,11 +44,15 @@ function screenshotKeyForUrl(url) {
     return `screenshot_${hashString(url || "")}`;
 }
 
-function buildSuspendedUrl(originalUrl, title) {
+function faviconKeyForUrl(url) {
+    return `favicon_${hashString(url || "")}`;
+}
+
+function buildSuspendedUrl(originalUrl, title, favicon) {
     const base = browser.runtime.getURL("src/suspended/suspended.html");
     const meta = [
         encodeURIComponent(title || ""),
-        "",
+        encodeURIComponent(favicon || ""),
         encodeURIComponent(SUSPENDED_PREFIX),
         ""
     ].join("|");
@@ -68,7 +72,8 @@ function isExceptionCached(url) {
     if (!domain) return false;
     for (const ex of cachedExceptions) {
         if (!ex) continue;
-        if (domain.includes(ex) || ex.includes(domain)) return true;
+        // Exact match (e.g. youtube.com === youtube.com) or subdomain match (music.youtube.com endsWith .youtube.com)
+        if (domain === ex || domain.endsWith("." + ex)) return true;
     }
     return false;
 }
@@ -204,11 +209,11 @@ const clearPendingUrl = (tabId) => {
     browser.storage.local.remove(`pending_suspend_${tabId}`);
 };
 
-const addSuspendedTabToStorage = (tabId, url, title, windowId) => {
+const addSuspendedTabToStorage = (tabId, url, title, windowId, favicon) => {
     // Single-writer via in-memory cache: avoids read-modify-write races when
     // suspending a batch of tabs.
     if (suspendedTabsCache === null) suspendedTabsCache = {};
-    suspendedTabsCache[tabId] = { url, title, windowId, timestamp: Date.now() };
+    suspendedTabsCache[tabId] = { url, title, windowId, timestamp: Date.now(), favicon: favicon || "" };
     return saveSuspendedTabsCache();
 };
 
@@ -257,6 +262,7 @@ async function suspendTab(tabId) {
 
     const createSuspendedUrl = async (screenshotUrl = "") => {
         const base = browser.runtime.getURL("src/suspended/suspended.html");
+        const favicon = tab.favIconUrl || "";
         if (screenshotUrl) {
             try {
                 // Stable key: survives window close / session restore where
@@ -268,9 +274,28 @@ async function suspendTab(tabId) {
                 debug("screenshot save failed (quota?):", e.message);
             }
         }
+        if (favicon) {
+            try {
+                // Stable key so session restores (new tabIds) still find the
+                // icon. Tiny strings, safe to keep alongside screenshots.
+                // Also write legacy tabId key for old suspended.js readers.
+                await browser.storage.local.set({
+                    [faviconKeyForUrl(tab.url)]: favicon,
+                    [`favicon_${tabId}`]: favicon
+                });
+            } catch (e) {
+                debug("favicon save failed:", e.message);
+            }
+        }
+        // Embed small http(s) favicons directly in the hash so the tab icon
+        // shows instantly (before the async storage read in suspended.js).
+        // data: URLs can be large — leave those to storage only.
+        const embedFavicon = favicon && !favicon.startsWith("data:") && favicon.length < 1500
+            ? favicon
+            : "";
         const meta = [
             encodeURIComponent(tab.title || ""),
-            "",
+            encodeURIComponent(embedFavicon),
             encodeURIComponent(SUSPENDED_PREFIX),
             tabId
         ].join("|");
@@ -280,7 +305,7 @@ async function suspendTab(tabId) {
     const updateTabToSuspended = async (screenshotUrl) => {
         const suspendedUrl = await createSuspendedUrl(screenshotUrl);
         await saveOriginalUrl(tabId, tab.url, tab.title);
-        await addSuspendedTabToStorage(tabId, tab.url, tab.title, tab.windowId);
+        await addSuspendedTabToStorage(tabId, tab.url, tab.title, tab.windowId, tab.favIconUrl || "");
         try {
             await browser.tabs.update(tabId, { url: suspendedUrl });
         } catch (error) {
@@ -368,6 +393,7 @@ async function unsuspendTab(tabId) {
     // restore. Remove both the stable URL-hash key and legacy tabId keys.
     browser.storage.local.remove([
         screenshotKeyForUrl(originalUrl),
+        faviconKeyForUrl(originalUrl),
         `screenshot_${tabId}`,
         `favicon_${tabId}`,
         `pending_suspend_${tabId}`
@@ -540,8 +566,49 @@ browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
     removeSuspendedTabFromStorage(tabId);
     if (activeTabs[removeInfo.windowId] === tabId) {
         delete activeTabs[removeInfo.windowId];
+        // Query the newly active tab in that window so activeTabs stays accurate
+        browser.tabs.query({ active: true, windowId: removeInfo.windowId }).then((tabs) => {
+            if (tabs.length > 0) {
+                activeTabs[removeInfo.windowId] = tabs[0].id;
+                untouch(tabs[0].id);
+            }
+        }).catch(() => {});
     }
 });
+
+if (browser.windows && browser.windows.onFocusChanged) {
+    let lastFocusedWindowId = browser.windows.WINDOW_ID_NONE;
+    browser.windows.onFocusChanged.addListener((windowId) => {
+        if (windowId === browser.windows.WINDOW_ID_NONE) {
+            lastFocusedWindowId = windowId;
+            return;
+        }
+        // When switching windows, the active tab in the previous window is now backgrounded
+        if (lastFocusedWindowId && lastFocusedWindowId !== browser.windows.WINDOW_ID_NONE && lastFocusedWindowId !== windowId) {
+            const prevWindowTabId = activeTabs[lastFocusedWindowId];
+            if (prevWindowTabId) {
+                browser.tabs.get(prevWindowTabId).then((prev) => {
+                    if (suspensionEnabled && autoSuspensionEnabled && isEligibleForAutoSuspend({ ...prev, active: false })) {
+                        touch(prevWindowTabId);
+                    }
+                }).catch(() => untouch(prevWindowTabId));
+            }
+        }
+        lastFocusedWindowId = windowId;
+        // Tab in newly focused window is now in active view
+        const currentActiveTabId = activeTabs[windowId];
+        if (currentActiveTabId) {
+            untouch(currentActiveTabId);
+        } else {
+            browser.tabs.query({ active: true, windowId }).then((tabs) => {
+                if (tabs.length > 0) {
+                    activeTabs[windowId] = tabs[0].id;
+                    untouch(tabs[0].id);
+                }
+            }).catch(() => {});
+        }
+    });
+}
 
 browser.runtime.onConnect.addListener((port) => {
     if (port.name === "suspended-tab") {
@@ -589,7 +656,10 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Click-to-restore from the suspended page: that navigation bypasses
         // unsuspendTab(), so delete the screenshot here. Fire-and-forget.
         if (message.url) {
-            browser.storage.local.remove(screenshotKeyForUrl(message.url));
+            browser.storage.local.remove([
+                screenshotKeyForUrl(message.url),
+                faviconKeyForUrl(message.url)
+            ]);
             if (sender && sender.tab && sender.tab.id !== undefined) {
                 browser.storage.local.remove([`screenshot_${sender.tab.id}`, `favicon_${sender.tab.id}`]);
                 removeSuspendedTabFromStorage(sender.tab.id);
@@ -688,7 +758,9 @@ function restoreClosedSuspendedTabs() {
                             // Restore as a SUSPENDED page (not the live URL) so
                             // the saved screenshot (keyed by URL hash) still
                             // displays. Screenshot stays until real restore.
-                            const suspendedUrl = buildSuspendedUrl(closedTab.url, closedTab.title);
+                            // Favicon (URL-hash key + embedded meta) restores
+                            // the tab icon the same way.
+                            const suspendedUrl = buildSuspendedUrl(closedTab.url, closedTab.title, closedTab.favicon || "");
                             let newTab;
                             try {
                                 newTab = await browser.tabs.create({ url: suspendedUrl, windowId: closedTab.windowId, active: false });
@@ -698,7 +770,7 @@ function restoreClosedSuspendedTabs() {
                                 newTab = await browser.tabs.create({ url: suspendedUrl, active: false });
                             }
                             if (newTab && newTab.id !== undefined) {
-                                await addSuspendedTabToStorage(newTab.id, closedTab.url, closedTab.title, newTab.windowId);
+                                await addSuspendedTabToStorage(newTab.id, closedTab.url, closedTab.title, newTab.windowId, closedTab.favicon || "");
                             }
                             await removeSuspendedTabFromStorage(closedTab.tabId);
                         } catch (e) {
@@ -738,23 +810,49 @@ function cleanupOrphanScreenshots(knownHashes) {
     collect().then((hashes) => {
         browser.storage.local.get(null).then((all) => {
             const orphans = Object.keys(all).filter((k) => {
-                if (!k.startsWith("screenshot_")) return false;
-                // Legacy numeric keys (screenshot_<tabId>): only kept if some
-                // old-format suspended tab still references them; they are
-                // migrated on view, otherwise purged here.
-                if (/^screenshot_\d+$/.test(k)) return true;
-                const hash = k.slice("screenshot_".length);
+                const isScreenshot = k.startsWith("screenshot_");
+                const isFavicon = k.startsWith("favicon_");
+                if (!isScreenshot && !isFavicon) return false;
+                const prefixLen = isScreenshot ? "screenshot_".length : "favicon_".length;
+                // Legacy numeric keys (screenshot_<tabId>, favicon_<tabId>):
+                // only kept if some old-format suspended tab still references
+                // them; they are migrated on view, otherwise purged here.
+                // Favicons are tiny, but data: URLs could still accumulate.
+                if (/^(screenshot|favicon)_\d+$/.test(k)) return true;
+                const hash = k.slice(prefixLen);
                 return !hashes.has(hash);
             });
             if (orphans.length > 0) {
-                debug(`cleaning ${orphans.length} orphan screenshots`);
+                debug(`cleaning ${orphans.length} orphan screenshots/favicons`);
                 browser.storage.local.remove(orphans);
             }
         }).catch((e) => debug("orphan cleanup failed:", e.message));
     }).catch((e) => debug("orphan cleanup failed:", e.message));
 }
 
+function cleanupStalePendingSuspends() {
+    browser.storage.local.get(null).then((all) => {
+        const now = Date.now();
+        const maxAgeMs = 24 * 60 * 60 * 1000; // 24 hours
+        const staleKeys = [];
+        for (const [key, value] of Object.entries(all)) {
+            if (key.startsWith("pending_suspend_")) {
+                if (!value || !value.savedAt || (now - value.savedAt > maxAgeMs)) {
+                    staleKeys.push(key);
+                }
+            }
+        }
+        if (staleKeys.length > 0) {
+            debug(`Cleaning up ${staleKeys.length} stale pending suspend entries`);
+            browser.storage.local.remove(staleKeys);
+        }
+    }).catch((e) => debug("stale pending suspend cleanup failed:", e.message));
+}
+
 // Startup
 loadInitialState();
-setTimeout(restoreClosedSuspendedTabs, 1000);
+setTimeout(() => {
+    restoreClosedSuspendedTabs();
+    cleanupStalePendingSuspends();
+}, 1500);
 updateIcon(suspensionEnabled);

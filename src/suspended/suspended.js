@@ -17,6 +17,24 @@ function screenshotKeyForUrl(url) {
     return `screenshot_${hashString(url || "")}`;
 }
 
+function faviconKeyForUrl(url) {
+    return `favicon_${hashString(url || "")}`;
+}
+
+function applyFavicon(href) {
+    if (!href) return;
+    try {
+        let link = document.getElementById('favicon');
+        if (!link) return;
+        link.href = href;
+        // Some browsers only pick up the tab icon if the rel also includes
+        // "shortcut icon".
+        link.setAttribute('rel', 'icon');
+    } catch (e) {
+        console.error("Error applying favicon:", e);
+    }
+}
+
 function parseSuspendedLocation() {
     // New format (2.x): suspended.html#<encTitle>|<encFavicon>|<encPrefix>|<tabId>@<originalUrl>
     const hash = window.location.hash.slice(1);
@@ -84,8 +102,11 @@ function initSuspendedPage() {
         document.getElementById('url').textContent = displayUrl;
         document.getElementById('url').href = url;
 
+        // Show the original site's icon on the suspended tab immediately if
+        // it was embedded in the hash (small http(s) icons), then upgrade
+        // from storage below (covers data: URLs + session restores).
         if (favicon) {
-            document.getElementById('favicon').href = favicon;
+            applyFavicon(favicon);
         }
 
         // Legacy tabs embedded the screenshot in the URL itself.
@@ -100,11 +121,13 @@ function initSuspendedPage() {
         // session restores keep showing the preview.
         if (url) {
             const stableKey = screenshotKeyForUrl(url);
-            const keys = [stableKey];
+            const stableFaviconKey = faviconKeyForUrl(url);
+            const keys = [stableKey, stableFaviconKey];
             if (tabId) keys.push(`screenshot_${tabId}`, `favicon_${tabId}`);
             browser.storage.local.get(keys).then(data => {
                 let storedScreenshot = data[stableKey];
-                const storedFavicon = (tabId && data[`favicon_${tabId}`]) || undefined;
+                const storedFavicon = data[stableFaviconKey] ||
+                    ((tabId && data[`favicon_${tabId}`]) || undefined);
 
                 // One-time migration: old tabId-keyed screenshot -> stable key
                 // so the next restart still finds it.
@@ -117,7 +140,18 @@ function initSuspendedPage() {
                     document.body.style.backgroundImage = `url(${storedScreenshot})`;
                 }
                 if (storedFavicon) {
-                    document.getElementById('favicon').href = storedFavicon;
+                    applyFavicon(storedFavicon);
+                    // One-time migration: old tabId-keyed favicon -> stable key
+                    // so the next restart still finds it.
+                    if (!data[stableFaviconKey]) {
+                        browser.storage.local.set({ [stableFaviconKey]: storedFavicon }).catch(() => {});
+                    }
+                } else if (!favicon) {
+                    // Last-resort fallback so the tab never shows a generic
+                    // globe: most sites serve /favicon.ico at the origin.
+                    try {
+                        applyFavicon(new URL(url).origin + '/favicon.ico');
+                    } catch (e) { /* non-http(s) URL, skip */ }
                 }
             });
         }
