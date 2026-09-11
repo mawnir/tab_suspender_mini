@@ -1,3 +1,59 @@
+const extApi = (typeof browser !== "undefined" && browser) || (typeof chrome !== "undefined" && chrome);
+
+function storageGet(keys) {
+    try {
+        const p = extApi.storage.local.get(keys);
+        if (p && typeof p.then === "function") return p;
+    } catch (e) { return Promise.reject(e); }
+    return new Promise((resolve, reject) => {
+        extApi.storage.local.get(keys, (res) => {
+            const err = extApi.runtime && extApi.runtime.lastError;
+            if (err) reject(new Error(err.message || String(err)));
+            else resolve(res);
+        });
+    });
+}
+
+function storageSet(obj) {
+    try {
+        const p = extApi.storage.local.set(obj);
+        if (p && typeof p.then === "function") return p;
+    } catch (e) { return Promise.reject(e); }
+    return new Promise((resolve, reject) => {
+        extApi.storage.local.set(obj, () => {
+            const err = extApi.runtime && extApi.runtime.lastError;
+            if (err) reject(new Error(err.message || String(err)));
+            else resolve();
+        });
+    });
+}
+
+function storageRemove(keys) {
+    try {
+        const p = extApi.storage.local.remove(keys);
+        if (p && typeof p.then === "function") return p;
+    } catch (e) { return Promise.reject(e); }
+    return new Promise((resolve, reject) => {
+        extApi.storage.local.remove(keys, () => {
+            const err = extApi.runtime && extApi.runtime.lastError;
+            if (err) reject(new Error(err.message || String(err)));
+            else resolve();
+        });
+    });
+}
+
+function sendMsg(msg) {
+    try {
+        const p = extApi.runtime.sendMessage(msg);
+        if (p && typeof p.then === "function") return p;
+        return Promise.resolve(p);
+    } catch (e) { return Promise.reject(e); }
+}
+
+function isSafeRestoreUrl(url) {
+    return typeof url === "string" && /^https?:\/\//i.test(url);
+}
+
 document.addEventListener('DOMContentLoaded', function () {
     recoverPendingUrls();
     const domainInput = document.getElementById('domainInput');
@@ -14,66 +70,54 @@ document.addEventListener('DOMContentLoaded', function () {
     const screenshotToggle = document.getElementById('screenshotToggle');
 
     // Load existing toggle state
-    browser.storage.local.get(['suspensionEnabled', 'screenshotsEnabled', 'autoSuspensionEnabled'], function (data) {
+    storageGet(['suspensionEnabled', 'screenshotsEnabled', 'autoSuspensionEnabled']).then(function (data) {
+        data = data || {};
         suspensionToggle.checked = data.suspensionEnabled !== false; // default to true
         screenshotToggle.checked = data.screenshotsEnabled !== false; // default to true
         autoSuspensionToggle.checked = data.autoSuspensionEnabled !== false; // default to true
         console.log("Loaded suspension enabled state:", suspensionToggle.checked);
         console.log("Loaded screenshots enabled state:", screenshotToggle.checked);
         console.log("Loaded auto suspension state:", autoSuspensionToggle.checked);
-    });
+    }).catch((e) => console.error("load toggles failed:", e));
 
     // Handle toggle change
     suspensionToggle.addEventListener('change', function () {
         const isEnabled = suspensionToggle.checked;
-        browser.storage.local.set({ suspensionEnabled: isEnabled }, function () {
+        storageSet({ suspensionEnabled: isEnabled }).then(function () {
             console.log("Suspension enabled state saved:", isEnabled);
-            browser.runtime.sendMessage({
-                action: "toggleSuspension",
-                enabled: isEnabled
-            });
-
-            // Update icon based on toggle state
-            browser.runtime.sendMessage({
-                action: "updateIcon",
-                active: isEnabled
-            });
-        });
+            sendMsg({ action: "toggleSuspension", enabled: isEnabled }).catch(() => {});
+            sendMsg({ action: "updateIcon", active: isEnabled }).catch(() => {});
+        }).catch((e) => console.error("save suspension failed:", e));
     });
 
     // Handle auto-suspension toggle change
     autoSuspensionToggle.addEventListener('change', function () {
         const isEnabled = autoSuspensionToggle.checked;
-        browser.storage.local.set({ autoSuspensionEnabled: isEnabled }, function () {
+        storageSet({ autoSuspensionEnabled: isEnabled }).then(function () {
             console.log("Auto suspension state saved:", isEnabled);
-            browser.runtime.sendMessage({
-                action: "toggleAutoSuspension",
-                enabled: isEnabled
-            });
-        });
+            sendMsg({ action: "toggleAutoSuspension", enabled: isEnabled }).catch(() => {});
+        }).catch((e) => console.error("save auto suspension failed:", e));
     });
 
     // Handle screenshot toggle change
     screenshotToggle.addEventListener('change', function () {
         const isEnabled = screenshotToggle.checked;
-        browser.storage.local.set({ screenshotsEnabled: isEnabled }, function () {
+        storageSet({ screenshotsEnabled: isEnabled }).then(function () {
             console.log("Screenshots enabled state saved:", isEnabled);
-            browser.runtime.sendMessage({
-                action: "toggleScreenshots",
-                enabled: isEnabled
-            });
-        });
+            sendMsg({ action: "toggleScreenshots", enabled: isEnabled }).catch(() => {});
+        }).catch((e) => console.error("save screenshots failed:", e));
     });
 
     // Load existing timer setting
-    browser.storage.local.get('suspensionTimer', function (data) {
+    storageGet('suspensionTimer').then(function (data) {
+        data = data || {};
         const totalMinutes = data.suspensionTimer || 1;
         const hours = Math.floor(totalMinutes / 60);
         const minutes = totalMinutes % 60;
 
         suspensionHoursInput.value = hours;
         suspensionMinutesInput.value = minutes;
-    });
+    }).catch(() => {});
 
     // Save timer setting
     saveTimerButton.addEventListener('click', function () {
@@ -99,9 +143,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
         const totalMinutes = (hoursValue * 60) + minutesValue;
 
-        browser.storage.local.set({ suspensionTimer: totalMinutes }, function () {
+        storageSet({ suspensionTimer: totalMinutes }).then(function () {
             console.log("Timer saved:", totalMinutes, "minutes");
-            browser.runtime.sendMessage({ action: "updateTimer", value: totalMinutes });
+            sendMsg({ action: "updateTimer", value: totalMinutes }).catch(() => {});
 
             // Add visual feedback
             const originalText = saveTimerButton.textContent;
@@ -112,7 +156,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 saveTimerButton.textContent = originalText;
                 saveTimerButton.disabled = false;
             }, 2000);
-        });
+        }).catch((e) => console.error("save timer failed:", e));
     });
 
     // Input validation listeners
@@ -120,7 +164,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const value = parseInt(this.value, 10);
         if (value < 0) this.value = 0;
         if (value > 23) this.value = 23;
-        
+
         // Adjust minutes if hours changes to 0 and minutes is 0
         const minutes = parseInt(suspensionMinutesInput.value, 10) || 0;
         if (value === 0 && minutes === 0) {
@@ -145,32 +189,31 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     // Load existing exceptions
-    browser.storage.local.get('exceptions', function (data) {
-        const exceptions = data.exceptions || [];
+    storageGet('exceptions').then(function (data) {
+        const exceptions = (data && data.exceptions) || [];
         console.log("Loaded exceptions:", exceptions);
         exceptions.forEach(addExceptionToList);
-    });
+    }).catch(() => {});
 
     addButton.addEventListener('click', function () {
-        let domain = domainInput.value.trim();
+        let domain = domainInput.value.trim().toLowerCase();
         if (domain) {
             // Remove protocol if present
             domain = domain.replace(/^(https?:\/\/)?(www\.)?/, '');
-            // Remove trailing slash if present
-            domain = domain.replace(/\/$/, '');
+            // Remove path and trailing slash if present
+            domain = domain.split('/')[0].replace(/\/$/, '');
 
-            browser.storage.local.get('exceptions', function (data) {
-                const exceptions = data.exceptions || [];
+            storageGet('exceptions').then(function (data) {
+                const exceptions = (data && data.exceptions) || [];
                 if (!exceptions.includes(domain)) {
                     exceptions.push(domain);
-                    browser.storage.local.set({ exceptions: exceptions }, function () {
+                    return storageSet({ exceptions: exceptions }).then(function () {
                         console.log("Exception added:", domain);
-                        console.log("Updated exceptions:", exceptions);
                         addExceptionToList(domain);
                         domainInput.value = '';
                     });
                 }
-            });
+            }).catch((e) => console.error("add exception failed:", e));
         }
     });
 
@@ -183,18 +226,17 @@ document.addEventListener('DOMContentLoaded', function () {
         removeButton.style.fontWeight = 'bold';
         removeButton.style.backgroundColor = 'rgb(188, 0, 0)';
         removeButton.addEventListener('click', function () {
-            browser.storage.local.get('exceptions', function (data) {
-                const exceptions = data.exceptions || [];
+            storageGet('exceptions').then(function (data) {
+                const exceptions = (data && data.exceptions) || [];
                 const index = exceptions.indexOf(domain);
                 if (index > -1) {
                     exceptions.splice(index, 1);
-                    browser.storage.local.set({ exceptions: exceptions }, function () {
+                    return storageSet({ exceptions: exceptions }).then(function () {
                         console.log("Exception removed:", domain);
-                        console.log("Updated exceptions:", exceptions);
                         li.remove();
                     });
                 }
-            });
+            }).catch((e) => console.error("remove exception failed:", e));
         });
         li.appendChild(removeButton);
         exceptionList.appendChild(li);
@@ -204,7 +246,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const suspendCurrentTabButton = document.getElementById('suspendCurrentTab');
     suspendCurrentTabButton.addEventListener('click', () => {
         console.log("Suspend current tab button clicked");
-        browser.runtime.sendMessage({ action: "suspendTab" })
+        sendMsg({ action: "suspendTab" })
             .then(response => {
                 console.log("Message sent successfully", response);
                 window.close(); // Close the popup after sending the message
@@ -219,10 +261,10 @@ document.addEventListener('DOMContentLoaded', function () {
     if (suspendOtherTabsButton) {
         suspendOtherTabsButton.addEventListener('click', () => {
             console.log("Suspend other tabs button clicked");
-            browser.runtime.sendMessage({ action: "suspendOtherTabs" })
+            sendMsg({ action: "suspendOtherTabs" })
                 .then(response => {
                     console.log("Message sent successfully", response);
-                    if (response.success) {
+                    if (response && response.success) {
                         console.log(`Suspended ${response.suspended} tabs, skipped ${response.skipped} tabs`);
                     }
                     window.close(); // Close the popup after sending the message
@@ -238,9 +280,9 @@ document.addEventListener('DOMContentLoaded', function () {
     const unsuspendOtherTabsButton = document.getElementById('unsuspendOtherTabs');
     if (unsuspendOtherTabsButton) {
         unsuspendOtherTabsButton.addEventListener('click', () => {
-            browser.runtime.sendMessage({ action: "unsuspendOtherTabs" })
+            sendMsg({ action: "unsuspendOtherTabs" })
                 .then(response => {
-                    if (response.success) {
+                    if (response && response.success) {
                         console.log(`Restored ${response.restored} tabs, skipped ${response.skipped} tabs`);
                     }
                     window.close(); // Close the popup after sending the message
@@ -252,33 +294,34 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     // Load visibility state from storage
-    browser.storage.local.get('showShortcutInfo', function (data) {
-        if (data.showShortcutInfo === false) {
+    storageGet('showShortcutInfo').then(function (data) {
+        if (data && data.showShortcutInfo === false) {
             infoBox.style.display = 'none';
         }
-    });
+    }).catch(() => {});
 
     hideInfoBtn.addEventListener('click', function () {
         infoBox.style.display = 'none';
-        browser.storage.local.set({ showShortcutInfo: false }, function () {
+        storageSet({ showShortcutInfo: false }).then(function () {
             console.log("Shortcut info hidden.");
-        });
+        }).catch(() => {});
     });
 });
 
 function recoverPendingUrls() {
-    browser.storage.local.get(null).then(allData => {
-        const pending = Object.entries(allData)
-            .filter(([key]) => key.startsWith('pending_suspend_'))
-            .map(([key, value]) => ({ key, tabId: key.replace('pending_suspend_', ''), ...value }));
-
-        if (pending.length === 0) return;
+    // Reads only the small `pendingSuspends` dict — never get(null), which
+    // would load multi-MB screenshots into the popup on every open.
+    storageGet('pendingSuspends').then(data => {
+        const pending = (data && data.pendingSuspends) || {};
+        const entries = Object.entries(pending).filter(([, v]) => v && v.url && isSafeRestoreUrl(v.url));
+        if (entries.length === 0) return;
 
         const container = document.getElementById('recovery-container');
         const list = document.getElementById('recovery-list');
+        if (!container || !list) return;
         container.style.display = 'block';
 
-        pending.forEach(({ key, tabId, url, title }) => {
+        entries.forEach(([tabId, { url, title }]) => {
             const li = document.createElement('li');
             li.style.cssText = 'display:flex; justify-content:space-between; align-items:center; background:var(--secondary); padding:6px 8px; border-radius:4px; margin-bottom:4px;';
 
@@ -291,8 +334,16 @@ function recoverPendingUrls() {
             btn.textContent = 'Restore';
             btn.style.cssText = 'background:rgb(93,24,149); font-size:12px; padding:4px 8px; flex-shrink:0;';
             btn.addEventListener('click', () => {
-                browser.tabs.create({ url });
-                browser.storage.local.remove(key);
+                if (!isSafeRestoreUrl(url)) return;
+                const create = extApi.tabs.create ? extApi.tabs.create({ url }) : null;
+                if (create && typeof create.then === "function") create.catch(() => {});
+                // Remove from new dict + legacy per-tab key (migration straggler).
+                storageGet('pendingSuspends').then(d => {
+                    const p = (d && d.pendingSuspends) || {};
+                    delete p[tabId];
+                    return storageSet({ pendingSuspends: p });
+                }).catch(() => {});
+                storageRemove(`pending_suspend_${tabId}`).catch(() => {});
                 li.remove();
                 if (list.children.length === 0) container.style.display = 'none';
             });
@@ -301,5 +352,5 @@ function recoverPendingUrls() {
             li.appendChild(btn);
             list.appendChild(li);
         });
-    });
+    }).catch(() => {});
 }

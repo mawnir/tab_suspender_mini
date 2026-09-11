@@ -1,5 +1,42 @@
 // Must stay in sync with background.js copy: URL-hash keys survive window
 // close / session restore, tabIds do not.
+// Cross-browser compat: Firefox `browser` (promises), Chrome `chrome` (callbacks).
+const extApi = (typeof browser !== "undefined" && browser) || (typeof chrome !== "undefined" && chrome);
+
+function storageGet(keys) {
+    try {
+        const p = extApi.storage.local.get(keys);
+        if (p && typeof p.then === "function") return p;
+    } catch (e) { return Promise.reject(e); }
+    return new Promise((resolve, reject) => {
+        extApi.storage.local.get(keys, (res) => {
+            const err = extApi.runtime && extApi.runtime.lastError;
+            if (err) reject(new Error(err.message || String(err)));
+            else resolve(res);
+        });
+    });
+}
+
+function storageSet(obj) {
+    try {
+        const p = extApi.storage.local.set(obj);
+        if (p && typeof p.then === "function") return p;
+    } catch (e) { return Promise.reject(e); }
+    return new Promise((resolve, reject) => {
+        extApi.storage.local.set(obj, () => {
+            const err = extApi.runtime && extApi.runtime.lastError;
+            if (err) reject(new Error(err.message || String(err)));
+            else resolve();
+        });
+    });
+}
+
+// Only http(s) may be restored. Blocks crafted
+// suspended.html#...@javascript:... payloads.
+function isSafeRestoreUrl(url) {
+    return typeof url === "string" && /^https?:\/\//i.test(url);
+}
+
 function hashString(str, seed) {
     let h1 = 0xdeadbeef ^ (seed || 0);
     let h2 = 0x41c6ce57 ^ (seed || 0);
@@ -84,6 +121,15 @@ function initSuspendedPage() {
     try {
         const { title, favicon, prefix, tabId, url, screenshot } = parseSuspendedLocation();
 
+        if (!isSafeRestoreUrl(url)) {
+            document.getElementById('pageTitle').textContent = "Invalid suspended URL";
+            document.getElementById('tabTitle').textContent = "Blocked: unsafe URL";
+            document.getElementById('url').textContent = "";
+            document.getElementById('url').removeAttribute("href");
+            console.error("Blocked unsafe restore URL");
+            return;
+        }
+
         document.getElementById('pageTitle').textContent = prefix + title;
         document.getElementById('tabTitle').textContent = title;
 
@@ -124,7 +170,8 @@ function initSuspendedPage() {
             const stableFaviconKey = faviconKeyForUrl(url);
             const keys = [stableKey, stableFaviconKey];
             if (tabId) keys.push(`screenshot_${tabId}`, `favicon_${tabId}`);
-            browser.storage.local.get(keys).then(data => {
+            storageGet(keys).then(data => {
+                data = data || {};
                 let storedScreenshot = data[stableKey];
                 const storedFavicon = data[stableFaviconKey] ||
                     ((tabId && data[`favicon_${tabId}`]) || undefined);
@@ -133,7 +180,7 @@ function initSuspendedPage() {
                 // so the next restart still finds it.
                 if (!storedScreenshot && tabId && data[`screenshot_${tabId}`]) {
                     storedScreenshot = data[`screenshot_${tabId}`];
-                    browser.storage.local.set({ [stableKey]: storedScreenshot }).catch(() => {});
+                    storageSet({ [stableKey]: storedScreenshot }).catch(() => {});
                 }
 
                 if (storedScreenshot) {
@@ -144,7 +191,7 @@ function initSuspendedPage() {
                     // One-time migration: old tabId-keyed favicon -> stable key
                     // so the next restart still finds it.
                     if (!data[stableFaviconKey]) {
-                        browser.storage.local.set({ [stableFaviconKey]: storedFavicon }).catch(() => {});
+                        storageSet({ [stableFaviconKey]: storedFavicon }).catch(() => {});
                     }
                 } else if (!favicon) {
                     // Last-resort fallback so the tab never shows a generic
@@ -153,38 +200,41 @@ function initSuspendedPage() {
                         applyFavicon(new URL(url).origin + '/favicon.ico');
                     } catch (e) { /* non-http(s) URL, skip */ }
                 }
-            });
+            }).catch(() => {});
         }
+
+        const restoreNow = () => {
+            if (!isSafeRestoreUrl(url)) return;
+            notifyRestore();
+            window.location.href = url;
+        };
 
         const notifyRestore = () => {
             // Tell background to drop the screenshot AFTER real restore.
             // Fire-and-forget: navigation must not wait for a response.
-            if (!url) return;
+            if (!url || !isSafeRestoreUrl(url)) return;
             try {
-                browser.runtime.sendMessage({ action: "screenshotConsumed", url });
+                extApi.runtime.sendMessage({ action: "screenshotConsumed", url });
             } catch (e) { /* background may be reloading */ }
         };
 
         document.getElementById('url').addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            notifyRestore();
-            window.location.href = url;
+            restoreNow();
         });
 
         document.body.addEventListener('click', (e) => {
             if (e.target && e.target.closest && e.target.closest('#url')) return;
-            notifyRestore();
-            window.location.href = url;
+            restoreNow();
         });
 
-        // Detect extension reload/unload to prevent tab from being closed by Firefox/Chrome
+        // Keep a port open so the background knows this tab is alive.
+        // NOTE: do NOT auto-navigate on disconnect — on extension update /
+        // reload every suspended tab would mass-restore live pages at once
+        // (CPU/memory spike) and lose screenshots.
         try {
-            const port = browser.runtime.connect({ name: "suspended-tab" });
-            port.onDisconnect.addListener(() => {
-                console.log("Extension disconnected, navigating back to original URL to prevent tab closure");
-                window.location.href = url;
-            });
+            extApi.runtime.connect({ name: "suspended-tab" });
         } catch (e) {
             console.error("Failed to connect to background page:", e);
         }

@@ -6,6 +6,46 @@ console.log("Tab Suspender extension loaded");
 const DEBUG = false;
 const debug = (...args) => { if (DEBUG) console.log(...args); };
 
+// ---- cross-browser compat (Firefox `browser` = promises, Chrome `chrome` = callbacks) ----
+// `typeof` guard avoids ReferenceError when `browser` is undefined in Chrome.
+const extApi = (typeof browser !== "undefined" && browser) || (typeof chrome !== "undefined" && chrome);
+if (!extApi) throw new Error("No WebExtension API found (browser/chrome)");
+
+function _promisify(fn, ...args) {
+    try {
+        const maybePromise = fn(...args);
+        if (maybePromise && typeof maybePromise.then === "function") return maybePromise;
+    } catch (e) {
+        return Promise.reject(e);
+    }
+    // Chrome callback style (also works in newer Chrome where promise exists but we got here).
+    return new Promise((resolve, reject) => {
+        try {
+            fn(...args, (result) => {
+                const err = extApi.runtime && extApi.runtime.lastError;
+                if (err) reject(new Error(err.message || String(err)));
+                else resolve(result);
+            });
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
+
+const storageGet = (keys) => _promisify(extApi.storage.local.get.bind(extApi.storage.local), keys);
+const storageSet = (obj) => _promisify(extApi.storage.local.set.bind(extApi.storage.local), obj);
+const storageRemove = (keys) => _promisify(extApi.storage.local.remove.bind(extApi.storage.local), keys);
+const tabsQuery = (info) => _promisify(extApi.tabs.query.bind(extApi.tabs), info);
+const tabsGet = (tabId) => _promisify(extApi.tabs.get.bind(extApi.tabs), tabId);
+const tabsUpdate = (tabId, props) => _promisify(extApi.tabs.update.bind(extApi.tabs), tabId, props);
+const tabsCreate = (props) => _promisify(extApi.tabs.create.bind(extApi.tabs), props);
+
+// Only http(s) may be restored. Blocks `javascript:`, `data:`, `file:` etc.
+// crafted as suspended.html#...@<payload>.
+function isSafeRestoreUrl(url) {
+    return typeof url === "string" && /^https?:\/\//i.test(url);
+}
+
 let SUSPEND_DELAY = 60; // seconds; set from storage (minutes -> seconds)
 const SUSPENDED_PREFIX = "💤 ";
 const SWEEP_INTERVAL_MS = 30000; // single sweeper, no per-tab setTimeout
@@ -18,6 +58,9 @@ let activeTabs = {}; // windowId -> tabId
 let lastSeen = {}; // tabId -> timestamp (ms) when it became inactive & eligible
 let cachedExceptions = []; // normalized strings, loaded once + kept via onChanged
 let suspendedTabsCache = null; // in-memory copy of {tabId: {...}}, single writer
+let pendingCache = null; // in-memory copy of {tabId: {url,title,savedAt}}, single writer
+// Popup reads only the small `pendingSuspends` key — never get(null), which
+// would load multi-MB screenshots into the popup.
 
 function normalizeException(s) {
     return (s || "").replace(/^(https?:\/\/)?(www\.)?/, "").replace(/\/$/, "").toLowerCase();
@@ -49,7 +92,7 @@ function faviconKeyForUrl(url) {
 }
 
 function buildSuspendedUrl(originalUrl, title, favicon) {
-    const base = browser.runtime.getURL("src/suspended/suspended.html");
+    const base = extApi.runtime.getURL("src/suspended/suspended.html");
     const meta = [
         encodeURIComponent(title || ""),
         encodeURIComponent(favicon || ""),
@@ -111,7 +154,7 @@ function extractOriginalUrl(suspendedUrl) {
 
 function getEffectiveUrl(tab) {
     if (!tab || !tab.url) return "";
-    const prefix = browser.runtime.getURL("src/suspended/suspended.html");
+    const prefix = extApi.runtime.getURL("src/suspended/suspended.html");
     if (tab.url.startsWith(prefix)) {
         return extractOriginalUrl(tab.url);
     }
@@ -119,11 +162,11 @@ function getEffectiveUrl(tab) {
 }
 
 function isEligibleForAutoSuspend(tab, effectiveUrl) {
-    if (!tab || tab.active || tab.audible) return false;
+    if (!tab || tab.active || tab.audible || tab.pinned || tab.discarded) return false;
     if (!tab.url) return false;
     // Raw-URL check first: never schedule anything already internal or
     // already suspended (suspended pages live under the extension origin).
-    const extPrefix = browser.runtime.getURL("");
+    const extPrefix = extApi.runtime.getURL("");
     if (tab.url.startsWith(extPrefix) ||
         tab.url.startsWith("about:") ||
         tab.url.startsWith("chrome:") ||
@@ -134,7 +177,7 @@ function isEligibleForAutoSuspend(tab, effectiveUrl) {
     }
     // Exception check runs against the effective (original) URL.
     const url = effectiveUrl !== undefined ? effectiveUrl : getEffectiveUrl(tab);
-    if (!url) return false;
+    if (!url || !isSafeRestoreUrl(url)) return false;
     return !isExceptionCached(url);
 }
 
@@ -151,16 +194,24 @@ function clearAllTimestamps() {
 }
 
 function updateIcon(active) {
-    const path = active ? "icons/icon_active.png" : "icons/icon_inactive.png";
-    browser.browserAction.setIcon({ path });
+    // Absolute path: relative paths resolve against the calling page
+    // (src/background/), not the extension root, in some browsers.
+    const path = active ? "/icons/icon_active.png" : "/icons/icon_inactive.png";
+    try {
+        const p = extApi.browserAction.setIcon({ path });
+        if (p && typeof p.catch === "function") p.catch((e) => debug("setIcon failed:", e.message));
+    } catch (e) {
+        debug("setIcon failed:", e.message);
+    }
 }
 
 // ---- storage (single initial read, then cache + onChanged) ----
 
 function loadInitialState() {
-    browser.storage.local.get(
-        ["suspensionEnabled", "screenshotsEnabled", "autoSuspensionEnabled", "suspensionTimer", "exceptions", "suspendedTabs"],
-        (data) => {
+    storageGet(
+        ["suspensionEnabled", "screenshotsEnabled", "autoSuspensionEnabled", "suspensionTimer", "exceptions", "suspendedTabs", "pendingSuspends"]
+    ).then((data) => {
+            data = data || {};
             suspensionEnabled = data.suspensionEnabled !== false;
             screenshotsEnabled = data.screenshotsEnabled !== false;
             autoSuspensionEnabled = data.autoSuspensionEnabled !== false;
@@ -168,13 +219,38 @@ function loadInitialState() {
             SUSPEND_DELAY = totalMinutes * 60;
             cachedExceptions = (data.exceptions || []).map(normalizeException);
             suspendedTabsCache = data.suspendedTabs || {};
+            pendingCache = data.pendingSuspends || {};
             updateIcon(suspensionEnabled);
             seedAllTabs();
-        }
-    );
+            migrateLegacyPendingKeys();
+        }).catch((e) => console.error("loadInitialState failed:", e));
 }
 
-browser.storage.onChanged.addListener((changes, area) => {
+// One-time migration: old `pending_suspend_<tabId>` keys -> single
+// `pendingSuspends` dict so the popup never needs get(null) (which would
+// load multi-MB screenshots just to list recovery entries).
+function migrateLegacyPendingKeys() {
+    storageGet(null).then((all) => {
+        if (!all) return;
+        const legacy = {};
+        const legacyKeys = [];
+        for (const [k, v] of Object.entries(all)) {
+            if (k.startsWith("pending_suspend_") && v && v.url) {
+                const tabId = k.slice("pending_suspend_".length);
+                legacy[tabId] = v;
+                legacyKeys.push(k);
+            }
+        }
+        if (legacyKeys.length === 0) return;
+        if (pendingCache === null) pendingCache = {};
+        Object.assign(pendingCache, legacy);
+        savePendingCache()
+            .then(() => storageRemove(legacyKeys).catch(() => {}))
+            .catch(() => {});
+    }).catch(() => {});
+}
+
+extApi.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     if (changes.suspensionEnabled) suspensionEnabled = changes.suspensionEnabled.newValue !== false;
     if (changes.screenshotsEnabled) screenshotsEnabled = changes.screenshotsEnabled.newValue !== false;
@@ -193,20 +269,32 @@ browser.storage.onChanged.addListener((changes, area) => {
     if (changes.suspendedTabs) {
         suspendedTabsCache = changes.suspendedTabs.newValue || {};
     }
+    if (changes.pendingSuspends) {
+        pendingCache = changes.pendingSuspends.newValue || {};
+    }
 });
 
 function saveSuspendedTabsCache() {
-    return browser.storage.local.set({ suspendedTabs: suspendedTabsCache || {} });
+    return storageSet({ suspendedTabs: suspendedTabsCache || {} });
+}
+
+function savePendingCache() {
+    return storageSet({ pendingSuspends: pendingCache || {} });
 }
 
 const saveOriginalUrl = (tabId, url, title) => {
-    return browser.storage.local.set({
-        [`pending_suspend_${tabId}`]: { url, title, savedAt: Date.now() }
-    });
+    if (pendingCache === null) pendingCache = {};
+    pendingCache[tabId] = { url, title, savedAt: Date.now() };
+    return savePendingCache();
 };
 
 const clearPendingUrl = (tabId) => {
-    browser.storage.local.remove(`pending_suspend_${tabId}`);
+    // Delete from new dict + legacy per-tab key (migration stragglers).
+    if (pendingCache !== null && pendingCache[tabId]) {
+        delete pendingCache[tabId];
+        savePendingCache().catch((e) => debug("clearPending failed:", e.message));
+    }
+    storageRemove(`pending_suspend_${tabId}`).catch(() => {});
 };
 
 const addSuspendedTabToStorage = (tabId, url, title, windowId, favicon) => {
@@ -225,50 +313,72 @@ const removeSuspendedTabFromStorage = (tabId) => {
         }
         return Promise.resolve();
     }
-    return new Promise((resolve) => {
-        browser.storage.local.get("suspendedTabs", (data) => {
-            const tabs = data.suspendedTabs || {};
-            if (tabs[tabId]) {
-                delete tabs[tabId];
-                browser.storage.local.set({ suspendedTabs: tabs }, resolve);
-            } else {
-                resolve();
-            }
-        });
-    });
+    return storageGet("suspendedTabs").then((data) => {
+        const tabs = (data && data.suspendedTabs) || {};
+        if (tabs[tabId]) {
+            delete tabs[tabId];
+            suspendedTabsCache = tabs;
+            return saveSuspendedTabsCache();
+        }
+    }).catch((e) => debug("removeSuspendedTab failed:", e.message));
 };
 
 // ---- core suspend ----
 
+// Capture a screenshot for `tab` without ever capturing the WRONG tab.
+// Firefox: tabs.captureTab(tabId) can capture a background tab.
+// Chrome: only tabs.captureVisibleTab(windowId) exists and it captures the
+//   VISIBLE tab of that window. Calling it for a background tab would
+//   screenshot the active tab instead — so we only capture when tab.active.
+async function captureScreenshotForTab(tab) {
+    if (!screenshotsEnabled) return "";
+    try {
+        if (extApi.tabs.captureTab) {
+            // Firefox path: true per-tab capture.
+            return await _promisify(extApi.tabs.captureTab.bind(extApi.tabs), tab.id, { format: "jpeg", quality: 50 });
+        }
+        // Chrome path: only the visible tab can be captured.
+        if (tab.active && extApi.tabs.captureVisibleTab) {
+            return await _promisify(extApi.tabs.captureVisibleTab.bind(extApi.tabs), tab.windowId, { format: "jpeg", quality: 50 });
+        }
+        return "";
+    } catch (e) {
+        debug("screenshot capture failed:", e.message);
+        return "";
+    }
+}
+
 async function suspendTab(tabId) {
     if (!suspensionEnabled) throw new Error("Suspension is disabled");
 
-    const tab = await browser.tabs.get(tabId);
+    const tab = await tabsGet(tabId);
     if (!tab.url) throw new Error("Tab has no URL");
 
     const effectiveUrl = getEffectiveUrl(tab);
-    const prefix = browser.runtime.getURL("");
+    const prefix = extApi.runtime.getURL("");
     if (tab.audible ||
+        tab.discarded ||
         tab.url.startsWith(prefix) ||
         tab.url.startsWith("about:") ||
         tab.url.startsWith("chrome:") ||
         tab.url.startsWith("moz-extension:") ||
         tab.url === "about:blank" ||
         tab.url === "about:newtab" ||
+        !isSafeRestoreUrl(effectiveUrl || tab.url) ||
         isExceptionCached(effectiveUrl)) {
         untouch(tabId);
         throw new Error("Tab not eligible for suspension");
     }
 
     const createSuspendedUrl = async (screenshotUrl = "") => {
-        const base = browser.runtime.getURL("src/suspended/suspended.html");
+        const base = extApi.runtime.getURL("src/suspended/suspended.html");
         const favicon = tab.favIconUrl || "";
         if (screenshotUrl) {
             try {
                 // Stable key: survives window close / session restore where
                 // tabIds change. Legacy `screenshot_<tabId>` fallback is read
                 // by suspended.js but no longer written.
-                await browser.storage.local.set({ [screenshotKeyForUrl(tab.url)]: screenshotUrl });
+                await storageSet({ [screenshotKeyForUrl(tab.url)]: screenshotUrl });
             } catch (e) {
                 // Quota exceeded (5MB local): suspend anyway, just no preview.
                 debug("screenshot save failed (quota?):", e.message);
@@ -279,7 +389,7 @@ async function suspendTab(tabId) {
                 // Stable key so session restores (new tabIds) still find the
                 // icon. Tiny strings, safe to keep alongside screenshots.
                 // Also write legacy tabId key for old suspended.js readers.
-                await browser.storage.local.set({
+                await storageSet({
                     [faviconKeyForUrl(tab.url)]: favicon,
                     [`favicon_${tabId}`]: favicon
                 });
@@ -307,30 +417,24 @@ async function suspendTab(tabId) {
         await saveOriginalUrl(tabId, tab.url, tab.title);
         await addSuspendedTabToStorage(tabId, tab.url, tab.title, tab.windowId, tab.favIconUrl || "");
         try {
-            await browser.tabs.update(tabId, { url: suspendedUrl });
+            await tabsUpdate(tabId, { url: suspendedUrl });
         } catch (error) {
             await removeSuspendedTabFromStorage(tabId);
-            await clearPendingUrl(tabId);
+            clearPendingUrl(tabId);
             throw error;
         }
         untouch(tabId);
         clearPendingUrl(tabId);
     };
 
-    if (screenshotsEnabled) {
-        try {
-            const screenshotUrl = await browser.tabs.captureTab(tabId, { format: "jpeg", quality: 50 });
-            await updateTabToSuspended(screenshotUrl);
-        } catch (e) {
-            // Screenshot failure must not block suspension (bulk sweeps especially).
-            await updateTabToSuspended();
-        }
-    } else {
-        await updateTabToSuspended();
-    }
+    // Screenshot failure must never block suspension (bulk sweeps especially).
+    // captureScreenshotForTab returns "" when capture is impossible (e.g.
+    // background tab in Chrome) instead of capturing the wrong tab.
+    const screenshotUrl = await captureScreenshotForTab(tab);
+    await updateTabToSuspended(screenshotUrl || undefined);
 }
 
-// Sequential + capped: captureTab + tabs.update for hundreds of tabs at once
+// Sequential + capped: capture + tabs.update for hundreds of tabs at once
 // freezes the browser. Callers (sweep, suspend-other) share this helper.
 async function suspendBatch(tabs, reason) {
     let suspended = 0;
@@ -351,23 +455,24 @@ async function suspendBatch(tabs, reason) {
 function suspendOtherTabs() {
     if (!suspensionEnabled) return Promise.reject(new Error("Suspension is disabled"));
 
-    return browser.tabs.query({ currentWindow: true }).then(async (tabs) => {
+    return tabsQuery({ currentWindow: true }).then(async (tabs) => {
         const activeTab = tabs.find((tab) => tab.active);
         if (!activeTab) throw new Error("No active tab found");
 
-        const prefix = browser.runtime.getURL("");
-        const candidates = tabs.filter((tab) =>
-            tab.id !== activeTab.id &&
-            !tab.audible &&
-            tab.url &&
-            !tab.url.startsWith(prefix) &&
-            !tab.url.startsWith("about:") &&
-            !tab.url.startsWith("chrome:") &&
-            !tab.url.startsWith("moz-extension:") &&
-            tab.url !== "about:blank" &&
-            tab.url !== "about:newtab" &&
-            !isExceptionCached(getEffectiveUrl(tab))
-        );
+        const prefix = extApi.runtime.getURL("");
+        const candidates = tabs.filter((tab) => {
+            if (tab.id === activeTab.id || tab.audible || tab.pinned || tab.discarded) return false;
+            if (!tab.url) return false;
+            if (tab.url.startsWith(prefix) ||
+                tab.url.startsWith("about:") ||
+                tab.url.startsWith("chrome:") ||
+                tab.url.startsWith("moz-extension:") ||
+                tab.url === "about:blank" ||
+                tab.url === "about:newtab") return false;
+            const effective = getEffectiveUrl(tab);
+            if (!isSafeRestoreUrl(effective || tab.url)) return false;
+            return !isExceptionCached(effective);
+        });
 
         if (candidates.length === 0) return { suspended: 0, skipped: tabs.length - 1 };
         // Manual action: suspend everything requested, sequentially (no cap).
@@ -379,32 +484,32 @@ function suspendOtherTabs() {
 // ---- unsuspend ----
 
 function isSuspendedTabUrl(url) {
-    return !!url && url.startsWith(browser.runtime.getURL("src/suspended/suspended.html"));
+    return !!url && url.startsWith(extApi.runtime.getURL("src/suspended/suspended.html"));
 }
 
 async function unsuspendTab(tabId) {
-    const tab = await browser.tabs.get(tabId);
+    const tab = await tabsGet(tabId);
     if (!isSuspendedTabUrl(tab.url)) throw new Error("Tab is not suspended");
     const originalUrl = extractOriginalUrl(tab.url);
-    if (!originalUrl) throw new Error("Suspended tab has no original URL");
-    await browser.tabs.update(tabId, { url: originalUrl });
+    if (!originalUrl || !isSafeRestoreUrl(originalUrl)) throw new Error("Suspended tab has no valid original URL");
+    await tabsUpdate(tabId, { url: originalUrl });
     await removeSuspendedTabFromStorage(tabId);
     // Screenshots now persist across views/restores — delete only on real
     // restore. Remove both the stable URL-hash key and legacy tabId keys.
-    browser.storage.local.remove([
+    storageRemove([
         screenshotKeyForUrl(originalUrl),
         faviconKeyForUrl(originalUrl),
         `screenshot_${tabId}`,
-        `favicon_${tabId}`,
-        `pending_suspend_${tabId}`
-    ]);
+        `favicon_${tabId}`
+    ]).catch((e) => debug("cleanup after unsuspend failed:", e.message));
+    clearPendingUrl(tabId);
     // Restored tab starts aging for auto-suspension from now.
     if (suspensionEnabled && autoSuspensionEnabled) touch(tabId);
     else untouch(tabId);
 }
 
 async function unsuspendOtherTabs() {
-    const tabs = await browser.tabs.query({ currentWindow: true });
+    const tabs = await tabsQuery({ currentWindow: true });
     const activeTab = tabs.find((tab) => tab.active);
     if (!activeTab) throw new Error("No active tab found");
     const candidates = tabs.filter((tab) => tab.id !== activeTab.id && isSuspendedTabUrl(tab.url));
@@ -430,7 +535,7 @@ async function unsuspendOtherTabs() {
 async function seedAllTabs() {
     if (!suspensionEnabled || !autoSuspensionEnabled) return;
     try {
-        const tabs = await browser.tabs.query({});
+        const tabs = await tabsQuery({});
         const now = Date.now();
         for (const tab of tabs) {
             if (isEligibleForAutoSuspend(tab)) {
@@ -448,7 +553,7 @@ async function sweepOnce() {
     if (!suspensionEnabled || !autoSuspensionEnabled) return;
     let tabs;
     try {
-        tabs = await browser.tabs.query({});
+        tabs = await tabsQuery({});
     } catch (e) {
         console.error("sweep query failed:", e);
         return;
@@ -484,58 +589,56 @@ async function sweepOnce() {
 
 // ---- events: just maintain timestamps, never create timers ----
 
-browser.tabs.query({ active: true }).then((tabs) => {
+tabsQuery({ active: true }).then((tabs) => {
     tabs.forEach((tab) => {
         activeTabs[tab.windowId] = tab.id;
     });
-});
+}).catch((e) => debug("initial activeTabs query failed:", e.message));
 
-browser.commands.onCommand.addListener((command) => {
+extApi.commands.onCommand.addListener((command) => {
     if (command === "suspend-tab" && suspensionEnabled) {
-        browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+        tabsQuery({ active: true, currentWindow: true }).then((tabs) => {
             if (tabs.length > 0) suspendTab(tabs[0].id).catch((e) => debug("suspend-tab:", e.message));
-        });
+        }).catch((e) => debug("suspend-tab query failed:", e.message));
     } else if (command === "suspend-other-tabs" && suspensionEnabled) {
         suspendOtherTabs().catch((error) => console.error("Error suspending other tabs:", error));
     }
 });
 
-browser.contextMenus.create({
-    id: "suspend-tab",
-    title: "Suspend This Tab",
-    contexts: ["page", "tab"]
-});
+// removeAll first: re-creating the same IDs on reload otherwise throws.
+if (extApi.contextMenus && extApi.contextMenus.removeAll) {
+    _promisify(extApi.contextMenus.removeAll.bind(extApi.contextMenus)).then(() => {
+        try {
+            extApi.contextMenus.create({ id: "suspend-tab", title: "Suspend This Tab", contexts: ["page", "tab"] });
+            extApi.contextMenus.create({ id: "suspend-other-tabs", title: "Suspend All Other Tabs", contexts: ["page", "tab"] });
+            extApi.contextMenus.create({ id: "suspend-selected-tabs", title: "Suspend Selected Tabs", contexts: ["tab"] });
+        } catch (e) {
+            debug("contextMenus create failed:", e.message);
+        }
+    }).catch((e) => debug("contextMenus setup failed:", e.message));
+}
 
-browser.contextMenus.create({
-    id: "suspend-other-tabs",
-    title: "Suspend All Other Tabs",
-    contexts: ["page", "tab"]
-});
-
-browser.contextMenus.create({
-    id: "suspend-selected-tabs",
-    title: "Suspend Selected Tabs",
-    contexts: ["tab"]
-});
-
-browser.contextMenus.onClicked.addListener((info, tab) => {
+extApi.contextMenus.onClicked.addListener((info, tab) => {
     if (!suspensionEnabled) return;
     if (info.menuItemId === "suspend-tab" && tab && tab.id) {
         suspendTab(tab.id).catch((error) => debug("context suspend-tab:", error.message));
     } else if (info.menuItemId === "suspend-other-tabs") {
         suspendOtherTabs().catch((error) => console.error("Error suspending other tabs:", error));
     } else if (info.menuItemId === "suspend-selected-tabs" && tab && tab.id) {
-        browser.tabs.query({ highlighted: true, currentWindow: true }).then((tabs) => {
-            suspendBatch(tabs.filter((t) => t.id), "suspend-selected");
-        });
+        tabsQuery({ highlighted: true, currentWindow: true }).then((tabs) => {
+            // Never suspend the tab the user is currently looking at via a
+            // bulk action — that navigates away the active page. Single
+            // "Suspend This Tab" still allows it explicitly.
+            suspendBatch(tabs.filter((t) => t.id && !t.active), "suspend-selected");
+        }).catch((e) => debug("suspend-selected query failed:", e.message));
     }
 });
 
-browser.tabs.onActivated.addListener((activeInfo) => {
+extApi.tabs.onActivated.addListener((activeInfo) => {
     const prevTabId = activeTabs[activeInfo.windowId];
     if (prevTabId && prevTabId !== activeInfo.tabId) {
         // Previously visible tab starts aging now (if eligible).
-        browser.tabs.get(prevTabId).then((prev) => {
+        tabsGet(prevTabId).then((prev) => {
             if (suspensionEnabled && autoSuspensionEnabled && isEligibleForAutoSuspend({ ...prev, active: false })) {
                 touch(prevTabId);
             }
@@ -545,15 +648,15 @@ browser.tabs.onActivated.addListener((activeInfo) => {
     untouch(activeInfo.tabId);
 });
 
-browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+extApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.url && !isSuspendedTabUrl(changeInfo.url)) {
         removeSuspendedTabFromStorage(tabId);
     }
     if (!suspensionEnabled || !autoSuspensionEnabled) return;
-    if (changeInfo.audible === true) {
+    if (changeInfo.audible === true || tab.audible) {
         untouch(tabId);
     } else if (changeInfo.status === "complete" || changeInfo.audible === false) {
-        if (!tab.active && isEligibleForAutoSuspend({ ...tab, audible: false })) {
+        if (!tab.active && isEligibleForAutoSuspend(tab)) {
             if (lastSeen[tabId] === undefined) touch(tabId);
         } else {
             untouch(tabId);
@@ -561,13 +664,13 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     }
 });
 
-browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
+extApi.tabs.onRemoved.addListener((tabId, removeInfo) => {
     untouch(tabId);
     removeSuspendedTabFromStorage(tabId);
     if (activeTabs[removeInfo.windowId] === tabId) {
         delete activeTabs[removeInfo.windowId];
         // Query the newly active tab in that window so activeTabs stays accurate
-        browser.tabs.query({ active: true, windowId: removeInfo.windowId }).then((tabs) => {
+        tabsQuery({ active: true, windowId: removeInfo.windowId }).then((tabs) => {
             if (tabs.length > 0) {
                 activeTabs[removeInfo.windowId] = tabs[0].id;
                 untouch(tabs[0].id);
@@ -576,18 +679,19 @@ browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
     }
 });
 
-if (browser.windows && browser.windows.onFocusChanged) {
-    let lastFocusedWindowId = browser.windows.WINDOW_ID_NONE;
-    browser.windows.onFocusChanged.addListener((windowId) => {
-        if (windowId === browser.windows.WINDOW_ID_NONE) {
+if (extApi.windows && extApi.windows.onFocusChanged) {
+    let lastFocusedWindowId = extApi.windows.WINDOW_ID_NONE;
+    extApi.windows.onFocusChanged.addListener((windowId) => {
+        if (windowId === extApi.windows.WINDOW_ID_NONE) {
             lastFocusedWindowId = windowId;
             return;
         }
         // When switching windows, the active tab in the previous window is now backgrounded
-        if (lastFocusedWindowId && lastFocusedWindowId !== browser.windows.WINDOW_ID_NONE && lastFocusedWindowId !== windowId) {
+        // NOTE: WINDOW_ID_NONE is -1 (truthy), so compare explicitly.
+        if (lastFocusedWindowId !== extApi.windows.WINDOW_ID_NONE && lastFocusedWindowId !== windowId) {
             const prevWindowTabId = activeTabs[lastFocusedWindowId];
             if (prevWindowTabId) {
-                browser.tabs.get(prevWindowTabId).then((prev) => {
+                tabsGet(prevWindowTabId).then((prev) => {
                     if (suspensionEnabled && autoSuspensionEnabled && isEligibleForAutoSuspend({ ...prev, active: false })) {
                         touch(prevWindowTabId);
                     }
@@ -600,7 +704,7 @@ if (browser.windows && browser.windows.onFocusChanged) {
         if (currentActiveTabId) {
             untouch(currentActiveTabId);
         } else {
-            browser.tabs.query({ active: true, windowId }).then((tabs) => {
+            tabsQuery({ active: true, windowId }).then((tabs) => {
                 if (tabs.length > 0) {
                     activeTabs[windowId] = tabs[0].id;
                     untouch(tabs[0].id);
@@ -610,7 +714,7 @@ if (browser.windows && browser.windows.onFocusChanged) {
     });
 }
 
-browser.runtime.onConnect.addListener((port) => {
+extApi.runtime.onConnect.addListener((port) => {
     if (port.name === "suspended-tab") {
         debug("Suspended tab connected");
     }
@@ -618,13 +722,13 @@ browser.runtime.onConnect.addListener((port) => {
 
 // ---- messages ----
 
-browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === "suspendTab") {
         if (!suspensionEnabled) {
             sendResponse({ success: false, error: "Suspension is disabled" });
             return;
         }
-        browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+        tabsQuery({ active: true, currentWindow: true }).then((tabs) => {
             if (tabs.length > 0) {
                 suspendTab(tabs[0].id)
                     .then(() => sendResponse({ success: true }))
@@ -655,13 +759,14 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.action === "screenshotConsumed") {
         // Click-to-restore from the suspended page: that navigation bypasses
         // unsuspendTab(), so delete the screenshot here. Fire-and-forget.
-        if (message.url) {
-            browser.storage.local.remove([
+        // Validate: ignore crafted non-http(s) payloads.
+        if (message.url && isSafeRestoreUrl(message.url)) {
+            storageRemove([
                 screenshotKeyForUrl(message.url),
                 faviconKeyForUrl(message.url)
-            ]);
+            ]).catch(() => {});
             if (sender && sender.tab && sender.tab.id !== undefined) {
-                browser.storage.local.remove([`screenshot_${sender.tab.id}`, `favicon_${sender.tab.id}`]);
+                storageRemove([`screenshot_${sender.tab.id}`, `favicon_${sender.tab.id}`]).catch(() => {});
                 removeSuspendedTabFromStorage(sender.tab.id);
             }
         }
@@ -673,7 +778,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Persist; onChanged listener picks it up in all contexts.
         // No timestamp reset: existing lastSeen values are reused, the new
         // delay applies lazily on the next sweep.
-        browser.storage.local.set({ suspensionTimer: totalMinutes });
+        storageSet({ suspensionTimer: totalMinutes }).catch((e) => debug("updateTimer persist failed:", e.message));
     } else if (message.action === "toggleSuspension") {
         suspensionEnabled = message.enabled;
         if (!suspensionEnabled) {
@@ -693,7 +798,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     } else if (message.action === "toggleScreenshots") {
         screenshotsEnabled = message.enabled;
-        browser.storage.local.set({ screenshotsEnabled });
+        storageSet({ screenshotsEnabled }).catch((e) => debug("toggleScreenshots persist failed:", e.message));
 
     } else if (message.action === "updateIcon") {
         updateIcon(message.active);
@@ -706,29 +811,29 @@ setInterval(sweepOnce, SWEEP_INTERVAL_MS);
 // after ~30s and all setTimeout/setInterval state is lost.
 
 // Restore all suspended tabs when the extension is unloaded/reloaded
-if (browser.runtime.onSuspend) {
-    browser.runtime.onSuspend.addListener(() => {
-        browser.tabs.query({}).then((tabs) => {
+if (extApi.runtime.onSuspend) {
+    extApi.runtime.onSuspend.addListener(() => {
+        tabsQuery({}).then((tabs) => {
             tabs.forEach((tab) => {
                 if (isSuspendedTabUrl(tab.url)) {
                     const originalUrl = extractOriginalUrl(tab.url);
-                    if (originalUrl) browser.tabs.update(tab.id, { url: originalUrl });
+                    if (originalUrl && isSafeRestoreUrl(originalUrl)) tabsUpdate(tab.id, { url: originalUrl }).catch(() => {});
                 }
             });
-        });
+        }).catch(() => {});
     });
 }
 
 function restoreClosedSuspendedTabs() {
     const read = suspendedTabsCache !== null
         ? Promise.resolve(suspendedTabsCache)
-        : browser.storage.local.get("suspendedTabs").then((d) => (suspendedTabsCache = d.suspendedTabs || {}));
+        : storageGet("suspendedTabs").then((d) => (suspendedTabsCache = (d && d.suspendedTabs) || {}));
     read.then((suspendedTabs) => {
         if (Object.keys(suspendedTabs).length === 0) {
-            cleanupOrphanScreenshots(new Set());
+            cleanupOrphanScreenshots();
             return;
         }
-        browser.tabs.query({}).then((tabs) => {
+        tabsQuery({}).then((tabs) => {
             const openTabIds = new Set(tabs.map((tab) => tab.id));
             // URLs already open (live or suspended) must not be duplicated.
             const openUrls = new Set();
@@ -740,7 +845,11 @@ function restoreClosedSuspendedTabs() {
             Object.keys(suspendedTabs).forEach((tabIdStr) => {
                 const tabId = parseInt(tabIdStr, 10);
                 const entry = suspendedTabs[tabIdStr];
-                if (!entry || !entry.url) return;
+                if (!entry || !entry.url || !isSafeRestoreUrl(entry.url)) {
+                    // Drop unsafe/stale entries (e.g. crafted javascript: URLs).
+                    if (entry && entry.url && !isSafeRestoreUrl(entry.url)) removeSuspendedTabFromStorage(tabId);
+                    return;
+                }
                 if (!openTabIds.has(tabId) && !openUrls.has(entry.url)) {
                     closedTabs.push({ tabId, ...entry });
                 } else if (!openTabIds.has(tabId)) {
@@ -753,6 +862,7 @@ function restoreClosedSuspendedTabs() {
                 // Sequential restore: tabs.create in a tight loop with 1000+
                 // tabs spikes CPU/memory.
                 (async () => {
+                    let dirty = false;
                     for (const closedTab of closedTabs) {
                         try {
                             // Restore as a SUSPENDED page (not the live URL) so
@@ -763,19 +873,25 @@ function restoreClosedSuspendedTabs() {
                             const suspendedUrl = buildSuspendedUrl(closedTab.url, closedTab.title, closedTab.favicon || "");
                             let newTab;
                             try {
-                                newTab = await browser.tabs.create({ url: suspendedUrl, windowId: closedTab.windowId, active: false });
+                                newTab = await tabsCreate({ url: suspendedUrl, windowId: closedTab.windowId, active: false });
                             } catch (e) {
                                 // windowId gone (window was closed): open in a
                                 // current window instead.
-                                newTab = await browser.tabs.create({ url: suspendedUrl, active: false });
+                                newTab = await tabsCreate({ url: suspendedUrl, active: false });
                             }
+                            if (suspendedTabsCache === null) suspendedTabsCache = { ...suspendedTabs };
                             if (newTab && newTab.id !== undefined) {
-                                await addSuspendedTabToStorage(newTab.id, closedTab.url, closedTab.title, newTab.windowId, closedTab.favicon || "");
+                                suspendedTabsCache[newTab.id] = { url: closedTab.url, title: closedTab.title, windowId: newTab.windowId, timestamp: Date.now(), favicon: closedTab.favicon || "" };
                             }
-                            await removeSuspendedTabFromStorage(closedTab.tabId);
+                            delete suspendedTabsCache[closedTab.tabId];
+                            dirty = true;
                         } catch (e) {
                             debug("restore failed:", closedTab.url, e.message);
                         }
+                    }
+                    // Single write instead of one set() per restored tab.
+                    if (dirty) {
+                        try { await saveSuspendedTabsCache(); } catch (e) { debug("restore save failed:", e.message); }
                     }
                     cleanupOrphanScreenshots();
                 })();
@@ -789,64 +905,83 @@ function restoreClosedSuspendedTabs() {
 // Screenshots persist until real restore, so crash leftovers could grow
 // unbounded (5MB local quota). Keep only screenshots for currently-suspended
 // or registered URLs; drop the rest.
+// NOTE: storage has no keys-only listing, so get(null) loads values into
+// memory. This runs once at startup / after restores only — never per sweep.
 function cleanupOrphanScreenshots(knownHashes) {
     const collect = () => {
-        if (knownHashes) return Promise.resolve(knownHashes);
-        return browser.tabs.query({}).then((tabs) => {
+        if (knownHashes) return Promise.resolve({ hashes: knownHashes, openNumericIds: new Set() });
+        return tabsQuery({}).then((tabs) => {
             const hashes = new Set();
+            const openNumericIds = new Set(tabs.map((t) => t.id));
             tabs.forEach((tab) => {
                 if (isSuspendedTabUrl(tab.url)) {
                     const original = extractOriginalUrl(tab.url);
-                    if (original) hashes.add(hashString(original));
+                    if (original && isSafeRestoreUrl(original)) hashes.add(hashString(original));
                 }
             });
             const cache = suspendedTabsCache || {};
             Object.values(cache).forEach((entry) => {
-                if (entry && entry.url) hashes.add(hashString(entry.url));
+                if (entry && entry.url && isSafeRestoreUrl(entry.url)) hashes.add(hashString(entry.url));
             });
-            return hashes;
+            return { hashes, openNumericIds };
         });
     };
-    collect().then((hashes) => {
-        browser.storage.local.get(null).then((all) => {
+    collect().then(({ hashes, openNumericIds }) => {
+        storageGet(null).then((all) => {
+            all = all || {};
             const orphans = Object.keys(all).filter((k) => {
                 const isScreenshot = k.startsWith("screenshot_");
                 const isFavicon = k.startsWith("favicon_");
                 if (!isScreenshot && !isFavicon) return false;
+                if (k.startsWith("pending_suspend_")) return false;
                 const prefixLen = isScreenshot ? "screenshot_".length : "favicon_".length;
                 // Legacy numeric keys (screenshot_<tabId>, favicon_<tabId>):
-                // only kept if some old-format suspended tab still references
-                // them; they are migrated on view, otherwise purged here.
-                // Favicons are tiny, but data: URLs could still accumulate.
-                if (/^(screenshot|favicon)_\d+$/.test(k)) return true;
+                // keep while that tab is still open (old-format suspended tab
+                // may still reference it); delete once the tab is gone.
+                const m = k.match(/^(screenshot|favicon)_(\d+)$/);
+                if (m) return !openNumericIds.has(parseInt(m[2], 10));
                 const hash = k.slice(prefixLen);
                 return !hashes.has(hash);
             });
             if (orphans.length > 0) {
                 debug(`cleaning ${orphans.length} orphan screenshots/favicons`);
-                browser.storage.local.remove(orphans);
+                // Delete in chunks so a huge backlog doesn't block the background page.
+                const CHUNK = 50;
+                (async () => {
+                    for (let i = 0; i < orphans.length; i += CHUNK) {
+                        try { await storageRemove(orphans.slice(i, i + CHUNK)); } catch (e) { debug("orphan chunk delete failed:", e.message); break; }
+                    }
+                })();
             }
         }).catch((e) => debug("orphan cleanup failed:", e.message));
     }).catch((e) => debug("orphan cleanup failed:", e.message));
 }
 
 function cleanupStalePendingSuspends() {
-    browser.storage.local.get(null).then((all) => {
+    // Uses the small `pendingSuspends` dict only — never get(null), which
+    // would load multi-MB screenshots. Legacy per-tab keys are migrated in
+    // migrateLegacyPendingKeys().
+    const clean = (pending) => {
+        pending = pending || {};
         const now = Date.now();
         const maxAgeMs = 24 * 60 * 60 * 1000; // 24 hours
-        const staleKeys = [];
-        for (const [key, value] of Object.entries(all)) {
-            if (key.startsWith("pending_suspend_")) {
-                if (!value || !value.savedAt || (now - value.savedAt > maxAgeMs)) {
-                    staleKeys.push(key);
-                }
+        let dirty = false;
+        for (const [tabId, value] of Object.entries(pending)) {
+            if (!value || !value.savedAt || (now - value.savedAt > maxAgeMs)) {
+                delete pending[tabId];
+                dirty = true;
             }
         }
-        if (staleKeys.length > 0) {
-            debug(`Cleaning up ${staleKeys.length} stale pending suspend entries`);
-            browser.storage.local.remove(staleKeys);
+        if (dirty) {
+            pendingCache = pending;
+            savePendingCache().catch((e) => debug("stale pending cleanup failed:", e.message));
         }
-    }).catch((e) => debug("stale pending suspend cleanup failed:", e.message));
+    };
+    if (pendingCache !== null) clean(pendingCache);
+    else storageGet("pendingSuspends").then((d) => {
+        pendingCache = (d && d.pendingSuspends) || {};
+        clean(pendingCache);
+    }).catch((e) => debug("stale pending cleanup failed:", e.message));
 }
 
 // Startup
