@@ -348,7 +348,13 @@ async function captureScreenshotForTab(tab) {
     }
 }
 
-async function suspendTab(tabId) {
+// `opts.manual` = single-tab user action (context menu "Suspend This Tab",
+// keyboard shortcut, popup "Suspend"). The exception list is a *whitelist* for
+// automatic and bulk suspension only: a manual single-tab suspend bypasses it
+// so the user can always suspend a listed site on purpose. Safety checks
+// (audible, internal pages, non-http(s) URLs) still apply in both modes.
+async function suspendTab(tabId, opts) {
+    const manual = !!(opts && opts.manual);
     if (!suspensionEnabled) throw new Error("Suspension is disabled");
 
     const tab = await tabsGet(tabId);
@@ -365,7 +371,7 @@ async function suspendTab(tabId) {
         tab.url === "about:blank" ||
         tab.url === "about:newtab" ||
         !isSafeRestoreUrl(effectiveUrl || tab.url) ||
-        isExceptionCached(effectiveUrl)) {
+        (!manual && isExceptionCached(effectiveUrl))) {
         untouch(tabId);
         throw new Error("Tab not eligible for suspension");
     }
@@ -436,6 +442,8 @@ async function suspendTab(tabId) {
 
 // Sequential + capped: capture + tabs.update for hundreds of tabs at once
 // freezes the browser. Callers (sweep, suspend-other) share this helper.
+// Batch (bulk) suspensions never bypass the whitelist: `opts` is left unset
+// here on purpose, so suspendTab applies the automatic-mode checks.
 async function suspendBatch(tabs, reason) {
     let suspended = 0;
     let skipped = 0;
@@ -471,6 +479,8 @@ function suspendOtherTabs() {
                 tab.url === "about:newtab") return false;
             const effective = getEffectiveUrl(tab);
             if (!isSafeRestoreUrl(effective || tab.url)) return false;
+            // Whitelist still applies to bulk actions — only single-tab manual
+            // suspends bypass it (see suspendTab's `manual` flag).
             return !isExceptionCached(effective);
         });
 
@@ -611,7 +621,7 @@ if (extApi.commands && extApi.commands.onCommand) {
             }
             tabsQuery({ active: true, currentWindow: true }).then((tabs) => {
                 if (tabs.length > 0) {
-                    suspendTab(tabs[0].id)
+                    suspendTab(tabs[0].id, { manual: true })
                         .then(() => console.log(`[commands] suspended tab ${tabs[0].id}`))
                         .catch((e) => console.warn("[commands] suspend-tab skipped:", e.message));
                 } else {
@@ -648,7 +658,7 @@ if (extApi.contextMenus && extApi.contextMenus.removeAll) {
 extApi.contextMenus.onClicked.addListener((info, tab) => {
     if (!suspensionEnabled) return;
     if (info.menuItemId === "suspend-tab" && tab && tab.id) {
-        suspendTab(tab.id).catch((error) => debug("context suspend-tab:", error.message));
+        suspendTab(tab.id, { manual: true }).catch((error) => debug("context suspend-tab:", error.message));
     } else if (info.menuItemId === "suspend-other-tabs") {
         suspendOtherTabs().catch((error) => console.error("Error suspending other tabs:", error));
     } else if (info.menuItemId === "suspend-selected-tabs" && tab && tab.id) {
@@ -757,7 +767,7 @@ extApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         tabsQuery({ active: true, currentWindow: true }).then((tabs) => {
             if (tabs.length > 0) {
-                suspendTab(tabs[0].id)
+                suspendTab(tabs[0].id, { manual: true })
                     .then(() => sendResponse({ success: true }))
                     .catch((error) => sendResponse({ success: false, error: error.message }));
             } else {

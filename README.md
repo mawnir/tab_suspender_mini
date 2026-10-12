@@ -45,7 +45,7 @@ Popup: toggles, manual suspend / unsuspend, timer, and domain exceptions. Suspen
 
 ### 🛡️ Smart Protections (never suspended)
 - Tabs currently playing audio (`audible`)
-- Domain exceptions (normalized, matches subdomains – e.g. `youtube.com` covers `www.youtube.com`, `music.youtube.com`)
+- Domain exceptions (normalized, matches subdomains – e.g. `youtube.com` covers `www.youtube.com`, `music.youtube.com`) — these block automatic **and bulk** suspension; only the single-tab manual actions (context menu "Suspend This Tab", keyboard shortcut, popup "Suspend") suspend a listed domain on purpose
 - Internal pages: `about:`, `about:blank`, `about:newtab`, `chrome:`, `moz-extension:`, and already-suspended pages
 
 ### 🧠 Crash / Restart Recovery
