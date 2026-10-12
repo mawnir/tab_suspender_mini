@@ -1,444 +1,224 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8" />
-    <title>Tab Suspender Mini Settings</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --primary: #8b5cf6;
-            --primary-hover: #a78bfa;
-            --primary-glow: rgba(139, 92, 246, 0.35);
-            --bg-gradient: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            --foreground: #f8fafc;
-            --foreground-muted: #94a3b8;
-            --card: rgba(30, 41, 59, 0.7);
-            --card-border: rgba(255, 255, 255, 0.08);
-            --secondary: rgba(51, 65, 85, 0.6);
-            --input-bg: rgba(15, 23, 42, 0.6);
-            --border: rgba(255, 255, 255, 0.1);
-            --danger: #ef4444;
-            --danger-hover: #f87171;
-            --danger-glow: rgba(239, 68, 68, 0.3);
-            --success: #10b981;
-            --info-bg: rgba(139, 92, 246, 0.1);
-            --info-border: rgba(139, 92, 246, 0.3);
-            --info-text: #ddd6fe;
-        }
-
-        body {
-            width: 360px;
-            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            padding: 16px;
-            margin: 0;
-            background: var(--bg-gradient);
-            color: var(--foreground);
-            font-size: 14px;
-            box-sizing: border-box;
-            border-radius: 8px;
-            overflow-x: hidden;
-        }
-
-        h1 {
-            font-size: 20px;
-            font-weight: 700;
-            background: linear-gradient(to right, #a78bfa, #f472b6);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-top: 0;
-            margin-bottom: 16px;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 12px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .toggle {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 12px;
-            padding: 6px 0;
-        }
-
-        .toggle-label {
-            font-weight: 500;
-            color: var(--foreground);
-        }
-
-        .switch {
-            position: relative;
-            display: inline-block;
-            width: 42px;
-            height: 24px;
-        }
-
-        .switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: var(--secondary);
-            transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            border-radius: 24px;
-            border: 1px solid var(--border);
-        }
-
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 16px;
-            width: 16px;
-            left: 3px;
-            bottom: 3px;
-            background-color: white;
-            transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            border-radius: 50%;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-        }
-
-        input:checked+.slider {
-            background-color: var(--primary);
-            border-color: var(--primary);
-        }
-
-        input:checked+.slider:before {
-            transform: translateX(18px);
-        }
-
-        .card {
-            background: var(--card);
-            border: 1px solid var(--card-border);
-            border-radius: 10px;
-            padding: 14px;
-            margin-bottom: 16px;
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        }
-
-        h2 {
-            margin: 0 0 10px;
-            font-size: 15px;
-            font-weight: 600;
-            color: #f1f5f9;
-        }
-
-        .input-group {
-            margin-bottom: 0;
-        }
-
-        label {
-            display: inline-block;
-            margin-bottom: 4px;
-            font-weight: 500;
-            font-size: 13px;
-            color: var(--foreground-muted);
-        }
-
-        input[type="text"],
-        input[type="number"] {
-            background-color: var(--input-bg);
-            color: var(--foreground);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 8px 10px;
-            font-size: 13px;
-            font-family: inherit;
-            box-sizing: border-box;
-            transition: border-color 0.2s, box-shadow 0.2s;
-        }
-
-        input[type="text"]:focus,
-        input[type="number"]:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px var(--primary-glow);
-            outline: none;
-        }
-
-        input[type="number"] {
-            width: 65px;
-            text-align: center;
-        }
-
-        .timer-input {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .timer-input span {
-            color: var(--foreground-muted);
-            font-size: 13px;
-        }
-
-        button {
-            background-color: var(--primary);
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 600;
-            font-family: inherit;
-            transition: background-color 0.2s, transform 0.1s, box-shadow 0.2s;
-        }
-
-        button:hover {
-            background-color: var(--primary-hover);
-            box-shadow: 0 0 10px var(--primary-glow);
-        }
-
-        button:active {
-            transform: scale(0.98);
-        }
-
-        .button-row {
-            display: flex;
-            gap: 10px;
-            margin-top: 6px;
-            margin-bottom: 16px;
-        }
-
-        #suspendCurrentTab {
-            flex: 1.3;
-            background: linear-gradient(135deg, var(--primary) 0%, #7c3aed 100%);
-            box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
-        }
-
-        #suspendCurrentTab:hover {
-            background: linear-gradient(135deg, #a78bfa 0%, var(--primary) 100%);
-        }
-
-        #suspendOtherTabs {
-            flex: 1;
-            background: linear-gradient(135deg, var(--danger) 0%, #be123c 100%);
-            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
-        }
-
-        #suspendOtherTabs:hover {
-            background: linear-gradient(135deg, var(--danger-hover) 0%, var(--danger) 100%);
-        }
-
-        #unsuspendOtherTabs {
-            flex: 1;
-            background: linear-gradient(135deg, #10b981 0%, #047857 100%);
-            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
-        }
-
-        #unsuspendOtherTabs:hover {
-            background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
-        }
-
-        .input-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-        }
-
-        .timer-config-row {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        #exceptionList {
-            list-style: none;
-            padding: 0;
-            margin: 8px 0 0;
-            max-height: 120px;
-            overflow-y: auto;
-        }
-
-        #exceptionList li {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background-color: var(--secondary);
-            padding: 6px 10px;
-            margin-top: 6px;
-            border-radius: 6px;
-            border: 1px solid var(--border);
-        }
-
-        .exception-domain {
-            font-size: 13px;
-            font-weight: 500;
-            color: #e2e8f0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            max-width: 200px;
-        }
-
-        .remove-domain {
-            background: none;
-            border: none;
-            color: var(--foreground-muted);
-            font-size: 14px;
-            cursor: pointer;
-            padding: 2px 6px;
-            font-weight: bold;
-            transition: color 0.2s;
-        }
-
-        .remove-domain:hover {
-            color: var(--danger);
-        }
-
-        .info {
-            background-color: var(--info-bg);
-            border: 1px solid var(--info-border);
-            color: var(--info-text);
-            padding: 10px 12px;
-            border-radius: 8px;
-            position: relative;
-            font-size: 12.5px;
-            line-height: 1.4;
-        }
-
-        #hideInfoBtn {
-            position: absolute;
-            top: 8px;
-            right: 8px;
-            background: none;
-            border: none;
-            font-size: 14px;
-            color: var(--foreground-muted);
-            cursor: pointer;
-            padding: 0;
-            line-height: 1;
-            transition: color 0.2s;
-        }
-
-        #hideInfoBtn:hover {
-            color: var(--danger);
-        }
-
-        #recovery-container {
-            border-left: 3px solid var(--danger);
-        }
-
-        #recovery-list li {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: var(--secondary);
-            padding: 6px 10px;
-            border-radius: 6px;
-            margin-bottom: 6px;
-            border: 1px solid var(--border);
-        }
-
-        #recovery-list li:last-child {
-            margin-bottom: 0;
-        }
-
-        ::-webkit-scrollbar {
-            width: 6px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: transparent;
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: var(--secondary);
-            border-radius: 3px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--foreground-muted);
-        }
-    </style>
+<meta charset="UTF-8" />
+<title>Tab Suspender Mini Settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0e131f;
+    --bg-soft: #151c2c;
+    --card: rgba(255, 255, 255, 0.04);
+    --border: rgba(255, 255, 255, 0.09);
+    --text: #eef2f7;
+    --muted: #9aa6b8;
+    --accent: #6e63f6;
+    --accent-hover: #7f75ff;
+    --accent-soft: rgba(110, 99, 246, 0.14);
+    --danger: #e5484d;
+    --success: #30a46c;
+    /* compat: popup.js writes background:var(--secondary) inline for recovery rows */
+    --secondary: rgba(255, 255, 255, 0.06);
+  }
+  * { box-sizing: border-box; }
+  body {
+    width: 360px;
+    margin: 0;
+    padding: 16px;
+    background: radial-gradient(120% 90% at 50% 0%, #1a2340 0%, var(--bg) 55%) fixed, var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
+    background: linear-gradient(135deg, #6e63f6, #4a3fd4);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .header h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+  .header p { margin: 1px 0 0; font-size: 12px; color: var(--muted); }
+  .actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .actions button {
+    font: inherit; font-size: 12.5px; font-weight: 600;
+    padding: 9px 6px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--border);
+    transition: background 0.15s, border-color 0.15s, transform 0.08s;
+  }
+  .actions button:active { transform: scale(0.97); }
+  #suspendCurrentTab { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #suspendCurrentTab:hover { background: var(--accent-hover); }
+  #suspendOtherTabs { background: transparent; color: var(--text); }
+  #suspendOtherTabs:hover { border-color: var(--danger); color: #ffb4b8; }
+  #unsuspendOtherTabs { background: transparent; color: var(--text); }
+  #unsuspendOtherTabs:hover { border-color: var(--success); color: #9fe8c4; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; }
+  .row + .row { border-top: 1px solid rgba(255,255,255,0.06); }
+  .row-text { font-weight: 500; font-size: 13.5px; }
+  .row-text small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); margin-top: 1px; }
+  .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; cursor: pointer; background: rgba(255,255,255,0.16); border-radius: 999px; transition: background 0.2s; }
+  .slider::before { content: ""; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: transform 0.2s; }
+  input:checked + .slider { background: var(--accent); }
+  input:checked + .slider::before { transform: translateX(16px); }
+  input:focus-visible + .slider { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+  .card h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+  .timer-row { display: flex; align-items: center; gap: 8px; }
+  .timer-row input {
+    width: 58px; padding: 7px 6px; text-align: center;
+    font: inherit; font-weight: 600; color: var(--text);
+    background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .timer-row input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .timer-row span { font-size: 12px; color: var(--muted); }
+  .btn {
+    font: inherit; font-size: 12.5px; font-weight: 600;
+    background: var(--accent-soft); color: #cfc9ff;
+    border: 1px solid rgba(110,99,246,0.4); border-radius: 8px;
+    padding: 7px 13px; cursor: pointer; transition: background 0.15s;
+  }
+  .btn:hover { background: rgba(110,99,246,0.25); }
+  .btn:disabled { opacity: 0.6; cursor: default; }
+  .add-row { display: flex; gap: 8px; }
+  .add-row input {
+    flex: 1; font: inherit; font-size: 13px; color: var(--text);
+    background: rgba(0,0,0,0.3); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; min-width: 0;
+  }
+  .add-row input::placeholder { color: #67748a; }
+  .add-row input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  #exceptionList { list-style: none; padding: 0; margin: 8px 0 0; max-height: 120px; overflow-y: auto; }
+  #exceptionList li {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border);
+    padding: 6px 6px 6px 10px; margin-top: 6px; border-radius: 8px;
+    font-size: 13px;
+    overflow: hidden;
+  }
+  /* popup.js sets the remove button inline (bold + red bg) — restyle without touching JS */
+  #exceptionList li button {
+    background: rgba(255,255,255,0.08) !important;
+    color: var(--muted) !important;
+    border: 1px solid transparent !important;
+    border-radius: 6px !important;
+    font-size: 13px !important;
+    padding: 3px 9px !important;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  #exceptionList li button:hover { color: #ffb4b8 !important; border-color: var(--danger) !important; }
+  #recovery-container { border-color: rgba(229,72,77,0.45); }
+  #recovery-container h2 { color: #ffb4b8; }
+  #recovery-list { list-style: none; padding: 0; margin: 0; }
+  /* popup.js writes li/button styles inline — keep modern look via override */
+  #recovery-list li {
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    margin-bottom: 6px !important;
+  }
+  #recovery-list li button {
+    background: var(--accent) !important;
+    border: none !important;
+    border-radius: 7px !important;
+    color: #fff !important;
+    cursor: pointer;
+  }
+  #recovery-list li button:hover { background: var(--accent-hover) !important; }
+  .tip {
+    display: flex; gap: 8px; align-items: flex-start;
+    font-size: 12.5px; color: var(--muted);
+    background: var(--accent-soft);
+    border: 1px solid rgba(110,99,246,0.3);
+    padding: 10px 12px; border-radius: 10px;
+    position: relative; padding-right: 30px;
+  }
+  .tip strong { color: var(--text); font-weight: 600; }
+  #hideInfoBtn {
+    position: absolute; top: 6px; right: 6px;
+    background: none; border: none; color: var(--muted);
+    font-size: 13px; cursor: pointer; padding: 2px 6px; border-radius: 6px;
+  }
+  #hideInfoBtn:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+</style>
 </head>
-
 <body>
 
-    <h1>💤 Tab Suspender Mini</h1>
+<div class="header">
+  <div class="logo" aria-hidden="true">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M20 13.5A8 8 0 0 1 10.5 4 8 8 0 1 0 20 13.5Z" fill="#fff" opacity="0.95"/></svg>
+  </div>
+  <div>
+    <h1>Tab Suspender Mini</h1>
+    <p>Rest tabs, save memory</p>
+  </div>
+</div>
 
-    <div class="toggle">
-        <span class="toggle-label">Enable Extension</span>
-        <label class="switch">
-            <input type="checkbox" id="suspensionToggle" />
-            <span class="slider"></span>
-        </label>
-    </div>
+<div class="actions">
+  <button id="suspendCurrentTab">Suspend tab</button>
+  <button id="suspendOtherTabs">Sleep others</button>
+  <button id="unsuspendOtherTabs">Wake others</button>
+</div>
 
-    <div class="toggle">
-        <span class="toggle-label">Enable Automatic Suspension</span>
-        <label class="switch">
-            <input type="checkbox" id="autoSuspensionToggle" />
-            <span class="slider"></span>
-        </label>
-    </div>
+<div class="card">
+  <div class="row">
+    <div class="row-text">Extension<small>Master switch</small></div>
+    <label class="switch"><input type="checkbox" id="suspensionToggle" /><span class="slider"></span></label>
+  </div>
+  <div class="row">
+    <div class="row-text">Auto suspend<small>Sleep idle tabs on a timer</small></div>
+    <label class="switch"><input type="checkbox" id="autoSuspensionToggle" /><span class="slider"></span></label>
+  </div>
+  <div class="row">
+    <div class="row-text">Screenshot<small>Show page preview when asleep</small></div>
+    <label class="switch"><input type="checkbox" id="screenshotToggle" /><span class="slider"></span></label>
+  </div>
+</div>
 
-    <div class="toggle">
-        <span class="toggle-label">Capture Tab Screenshots</span>
-        <label class="switch">
-            <input type="checkbox" id="screenshotToggle" />
-            <span class="slider"></span>
-        </label>
-    </div>
+<div class="card">
+  <h2>Suspend after</h2>
+  <div class="timer-row">
+    <input type="number" id="suspensionHours" min="0" max="23" value="0" aria-label="Hours"><span>hr</span>
+    <input type="number" id="suspensionMinutes" min="0" max="59" value="1" aria-label="Minutes"><span>min</span>
+    <button id="saveTimer" class="btn" style="margin-left:auto">Save</button>
+  </div>
+</div>
 
-    <div class="button-row">
-        <button id="suspendCurrentTab">Suspend Tab</button>
-        <button id="suspendOtherTabs">Suspend Others</button>
-    </div>
+<div class="card">
+  <h2>Never suspend</h2>
+  <div class="add-row">
+    <input type="text" id="domainInput" placeholder="e.g. youtube.com" aria-label="Domain to never suspend">
+    <button id="addDomain" class="btn">Add</button>
+  </div>
+  <ul id="exceptionList"></ul>
+</div>
 
-    <div class="button-row">
-        <button id="unsuspendOtherTabs">Unsuspend Others</button>
-    </div>
+<div id="recovery-container" style="display:none;" class="card">
+  <h2>Recovered tabs</h2>
+  <ul id="recovery-list"></ul>
+</div>
 
-    <div class="card">
-        <h2>Suspension Timer</h2>
-        <div class="input-row">
-            <div class="timer-config-row">
-                <div class="timer-input">
-                    <input type="number" id="suspensionHours" min="0" max="23" value="0">
-                    <span>hr</span>
-                </div>
-                <div class="timer-input">
-                    <input type="number" id="suspensionMinutes" min="0" max="59" value="1">
-                    <span>min</span>
-                </div>
-            </div>
-            <button id="saveTimer">Save</button>
-        </div>
-    </div>
+<div class="tip" id="shortcutInfo">
+  <span>Press <strong>Cmd/Ctrl+Shift+X</strong> to suspend, <strong>Cmd/Ctrl+Shift+Y</strong> for other tabs.</span>
+  <button id="hideInfoBtn" aria-label="Dismiss tip">✕</button>
+</div>
 
-    <div class="card">
-        <h2>Domain Exceptions</h2>
-        <div class="input-row" style="gap: 8px; width: 100%;">
-            <input type="text" id="domainInput" placeholder="e.g. youtube.com" style="flex: 1;">
-            <button id="addDomain">Add</button>
-        </div>
-        <ul id="exceptionList"></ul>
-    </div>
-
-    <div id="recovery-container" style="display:none;" class="card">
-        <h2 style="color: var(--danger); display: flex; align-items: center; gap: 6px;">⚠️ Recovered Lost Tabs</h2>
-        <ul id="recovery-list" style="list-style:none; padding:0; margin:0;"></ul>
-    </div>
-
-    <div class="info" id="shortcutInfo">
-        💡 Use <strong>Cmd/Ctrl+Shift+X</strong> to suspend, or <strong>Cmd/Ctrl+Shift+Y</strong> for other tabs.
-        <button id="hideInfoBtn" aria-label="Dismiss notification">✕</button>
-    </div>
-
-    <script src="popup.js"></script>
+<script src="popup.js"></script>
 </body>
-
 </html>

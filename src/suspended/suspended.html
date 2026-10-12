@@ -1,173 +1,116 @@
 <!DOCTYPE html>
-<html>
-
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title id="pageTitle"></title>
-    <link id="favicon" rel="icon" href="">
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --primary: #8b5cf6;
-            --primary-light: #c084fc;
-            --bg-gradient: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            --foreground: #f8fafc;
-            --foreground-muted: #94a3b8;
-            --card-bg: rgba(15, 23, 42, 0.75);
-            --card-border: rgba(255, 255, 255, 0.08);
-            --card-glow: rgba(139, 92, 246, 0.15);
-        }
-
-        body {
-            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            padding: 0;
-            margin: 0;
-            background: var(--bg-gradient);
-            background-size: cover;
-            background-position: center;
-            background-repeat: no-repeat;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            position: relative;
-            color: var(--foreground);
-            overflow: hidden;
-            cursor: pointer;
-        }
-
-        .overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(15, 23, 42, 0.5);
-            backdrop-filter: saturate(100%);
-            -webkit-backdrop-filter: blur(8px) saturate(120%);
-            z-index: 1;
-        }
-
-        .content {
-            background-color: var(--card-bg);
-            border: 1px solid var(--card-border);
-            padding: 40px 30px;
-            border-radius: 16px;
-            position: relative;
-            z-index: 2;
-            max-width: 480px;
-            width: 90%;
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3), 0 0 30px var(--card-glow);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            text-align: center;
-            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s;
-        }
-
-        body:hover .content {
-            transform: translateY(-4px);
-            box-shadow: 0 15px 35px -5px rgba(0, 0, 0, 0.4), 0 0 40px rgba(139, 92, 246, 0.25);
-            border-color: rgba(255, 255, 255, 0.15);
-        }
-
-        .icon-wrapper {
-            font-size: 48px;
-            margin-bottom: 16px;
-            display: inline-block;
-            animation: float 3s ease-in-out infinite;
-        }
-
-        @keyframes float {
-
-            0%,
-            100% {
-                transform: translateY(0);
-            }
-
-            50% {
-                transform: translateY(-8px);
-            }
-        }
-
-        h1 {
-            margin: 0 0 12px;
-            font-size: 22px;
-            font-weight: 700;
-            line-height: 1.3;
-            color: #ffffff;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-        }
-
-        p {
-            font-size: 15px;
-            color: var(--foreground-muted);
-            margin: 0 0 24px;
-            line-height: 1.5;
-        }
-
-        .reload-hint {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            background: linear-gradient(135deg, var(--primary) 0%, #7c3aed 100%);
-            color: white;
-            padding: 10px 20px;
-            border-radius: 8px;
-            font-weight: 600;
-            font-size: 14px;
-            box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
-            transition: opacity 0.2s;
-        }
-
-        .url-box {
-            margin-top: 24px;
-            padding-top: 18px;
-            border-top: 1px solid rgba(255, 255, 255, 0.08);
-        }
-
-        .url-label {
-            font-size: 12px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: rgba(255, 255, 255, 0.3);
-            margin-bottom: 6px;
-        }
-
-        a#url {
-            color: var(--primary-light);
-            text-decoration: none;
-            font-size: 13px;
-            word-break: break-all;
-            transition: color 0.2s;
-            display: inline-block;
-        }
-
-        a#url:hover {
-            color: #e9d5ff;
-            text-decoration: underline;
-        }
-    </style>
-    <script src="suspended.js" defer></script>
+<meta charset="UTF-8">
+<title id="pageTitle"></title>
+<link id="favicon" rel="icon" href="">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --text: #f2f5f9;
+    --muted: #a7b1c2;
+    --accent: #6e63f6;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0; padding: 24px;
+    background-color: #0e131f;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    min-height: 100vh;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: var(--text);
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+  }
+  /* light veil, no blur — screenshot stays sharp and fully visible */
+  .overlay {
+    position: absolute; inset: 0;
+    background-color: rgba(10, 15, 26, 0.45);
+    pointer-events: none;
+  }
+  .card {
+    position: relative;
+    width: min(480px, 100%);
+    background: rgba(16, 22, 36, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 20px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    padding: 32px 30px 24px;
+    text-align: center;
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; font-weight: 500; color: var(--muted);
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 999px;
+    padding: 5px 12px;
+    margin-bottom: 16px;
+  }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .icon {
+    width: 52px; height: 52px; border-radius: 16px;
+    background: linear-gradient(135deg, #6e63f6, #4a3fd4);
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 16px;
+    box-shadow: 0 8px 24px rgba(110, 99, 246, 0.4);
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: 20px; font-weight: 700; letter-spacing: -0.01em;
+    overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .sub { margin: 0 0 20px; font-size: 14px; color: var(--muted); }
+  .wake {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #fff; color: #111827;
+    font-size: 13.5px; font-weight: 600;
+    border-radius: 10px; padding: 10px 18px;
+  }
+  .wake svg { flex-shrink: 0; }
+  .url-box {
+    margin-top: 22px; padding-top: 16px;
+    border-top: 1px solid rgba(255,255,255,0.09);
+  }
+  a#url {
+    color: #b9b3ff; text-decoration: none; font-size: 13px; word-break: break-all;
+  }
+  a#url:hover { text-decoration: underline; }
+  a#url:focus-visible { outline: 2px solid #8f86ff; outline-offset: 3px; border-radius: 4px; }
+  .foot { position: relative; margin: 16px 0 0; font-size: 12px; color: var(--muted); }
+  @media (max-width: 560px) {
+    body { padding: 16px; }
+    .card { padding: 26px 20px; }
+  }
+</style>
+<script src="suspended.js" defer></script>
 </head>
-
 <body>
-    <div class="overlay"></div>
-    <div class="content">
-        <div class="icon-wrapper">💤</div>
-        <h1 id="tabTitle"></h1>
-        <p>This tab has been suspended to save system resources.</p>
-        <span class="reload-hint">Click anywhere to awake tab</span>
-        <div class="url-box">
-            <div class="url-label">Original URL</div>
-            <a id="url" href=""></a>
-        </div>
-    </div>
+<div class="overlay" aria-hidden="true"></div>
+<main class="card">
+  <span class="badge"><span class="dot"></span>Sleeping · memory saved</span>
+  <div class="icon" aria-hidden="true">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M20 13.5A8 8 0 0 1 10.5 4 8 8 0 1 0 20 13.5Z" fill="#fff"/></svg>
+  </div>
+  <h1 id="tabTitle"></h1>
+  <p class="sub">This tab is suspended. Click anywhere to wake it.</p>
+  <span class="wake">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3" fill="currentColor" stroke="none"/></svg>
+    Click to wake
+  </span>
+  <div class="url-box">
+    <a id="url" href=""></a>
+  </div>
+</main>
+<p class="foot">Tab Suspender Mini</p>
 </body>
-
 </html>
